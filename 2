@@ -11,30 +11,31 @@ def write_file(path, content):
         f.write(content)
 
 
-def extract_complete_block(text, start_index):
+def extract_block(text, start):
     """
-    Extract full {...} block safely with nested brace support.
+    Extract full block including nested braces.
+    Returns (block_text, end_index)
     """
-    brace_start = text.find("{", start_index)
+    brace_start = text.find("{", start)
     if brace_start == -1:
-        return None, start_index
+        return None, start
 
-    stack = 1
+    depth = 1
     i = brace_start + 1
 
-    while i < len(text) and stack > 0:
+    while i < len(text) and depth > 0:
         if text[i] == "{":
-            stack += 1
+            depth += 1
         elif text[i] == "}":
-            stack -= 1
+            depth -= 1
         i += 1
 
-    return text[start_index:i], i
+    return text[start:i], i
 
 
-def get_mode_from_block(block_text):
+def get_mode(block_text):
     """
-    Extract MODE name even if multiline formatted.
+    Extract mode even if formatted with newline/backslash.
     """
     match = re.search(
         r'mode\s*\(\s*modes\s*,\s*"([^"]+)"\s*\)',
@@ -46,45 +47,40 @@ def get_mode_from_block(block_text):
     return None
 
 
-def should_filter_block(text, index):
-    """
-    Check if block starting at index is timing() or internal_power()
-    """
-    return (
-        text.startswith("internal_power(", index)
-        or text.startswith("timing(", index)
-    )
-
-
-def filter_lib_by_mode(text, required_mode="MODE_R1K"):
+def filter_lib(text, required_mode="MODE_R1K"):
     output = []
     i = 0
     n = len(text)
 
     while i < n:
 
-        if should_filter_block(text, i):
+        # Detect internal_power or timing with flexible spacing
+        if text[i:].lstrip().startswith("internal_power(") or \
+           text[i:].lstrip().startswith("timing("):
 
-            block_text, end_index = extract_complete_block(text, i)
+            # Move i to actual keyword start
+            stripped = text[i:].lstrip()
+            offset = len(text[i:]) - len(stripped)
+            i_actual = i + offset
+
+            block_text, end_index = extract_block(text, i_actual)
 
             if block_text is None:
                 output.append(text[i])
                 i += 1
                 continue
 
-            mode_value = get_mode_from_block(block_text)
+            mode_value = get_mode(block_text)
 
-            # If block has mode and matches → keep
-            if mode_value == required_mode:
+            # Keep block only if:
+            # - mode matches required_mode
+            # - OR block has no mode()
+            if mode_value is None or mode_value == required_mode:
                 output.append(block_text)
 
-            # If block has no mode → keep (important!)
-            elif mode_value is None:
-                output.append(block_text)
-
-            # else → skip block
-
+            # Skip this entire block
             i = end_index
+
         else:
             output.append(text[i])
             i += 1
@@ -92,12 +88,12 @@ def filter_lib_by_mode(text, required_mode="MODE_R1K"):
     return "".join(output)
 
 
-def process_lib(input_file, output_file, required_mode="MODE_R1K"):
+def process(input_file, output_file, required_mode="MODE_R1K"):
     content = read_file(input_file)
-    filtered = filter_lib_by_mode(content, required_mode)
+    filtered = filter_lib(content, required_mode)
     write_file(output_file, filtered)
-    print("Finished filtering:", output_file)
+    print("Filtering completed.")
 
 
 if __name__ == "__main__":
-    process_lib("25C.lib", "25C_MODE_R1K.lib", "MODE_R1K")
+    process("25C.lib", "25C_MODE_R1K.lib", "MODE_R1K")
