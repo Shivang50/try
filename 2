@@ -13,17 +13,17 @@ def write_file(path, content):
 
 def extract_block(text, start):
     """
-    Extract full block including nested braces.
-    Returns (block_text, end_index)
+    Extract block from keyword start to matching closing brace.
     """
-    brace_start = text.find("{", start)
-    if brace_start == -1:
+    brace_pos = text.find("{", start)
+    if brace_pos == -1:
         return None, start
 
     depth = 1
-    i = brace_start + 1
+    i = brace_pos + 1
+    n = len(text)
 
-    while i < len(text) and depth > 0:
+    while i < n and depth > 0:
         if text[i] == "{":
             depth += 1
         elif text[i] == "}":
@@ -33,13 +33,10 @@ def extract_block(text, start):
     return text[start:i], i
 
 
-def get_mode(block_text):
-    """
-    Extract mode even if formatted with newline/backslash.
-    """
+def get_mode(block):
     match = re.search(
         r'mode\s*\(\s*modes\s*,\s*"([^"]+)"\s*\)',
-        block_text,
+        block,
         re.DOTALL
     )
     if match:
@@ -48,42 +45,35 @@ def get_mode(block_text):
 
 
 def filter_lib(text, required_mode="MODE_R1K"):
-    output = []
-    i = 0
     n = len(text)
+    i = 0
+    output = []
 
     while i < n:
 
-        # Detect internal_power or timing with flexible spacing
-        if text[i:].lstrip().startswith("internal_power(") or \
-           text[i:].lstrip().startswith("timing("):
-
-            # Move i to actual keyword start
-            stripped = text[i:].lstrip()
-            offset = len(text[i:]) - len(stripped)
-            i_actual = i + offset
-
-            block_text, end_index = extract_block(text, i_actual)
-
-            if block_text is None:
-                output.append(text[i])
-                i += 1
+        # Detect internal_power
+        if text.startswith("internal_power(", i):
+            block, end_i = extract_block(text, i)
+            if block:
+                mode = get_mode(block)
+                if mode is None or mode == required_mode:
+                    output.append(block)
+                i = end_i
                 continue
 
-            mode_value = get_mode(block_text)
+        # Detect timing
+        if text.startswith("timing(", i):
+            block, end_i = extract_block(text, i)
+            if block:
+                mode = get_mode(block)
+                if mode is None or mode == required_mode:
+                    output.append(block)
+                i = end_i
+                continue
 
-            # Keep block only if:
-            # - mode matches required_mode
-            # - OR block has no mode()
-            if mode_value is None or mode_value == required_mode:
-                output.append(block_text)
-
-            # Skip this entire block
-            i = end_index
-
-        else:
-            output.append(text[i])
-            i += 1
+        # Normal character
+        output.append(text[i])
+        i += 1
 
     return "".join(output)
 
@@ -92,8 +82,12 @@ def process(input_file, output_file, required_mode="MODE_R1K"):
     content = read_file(input_file)
     filtered = filter_lib(content, required_mode)
     write_file(output_file, filtered)
-    print("Filtering completed.")
+    print("Done.")
 
 
 if __name__ == "__main__":
-    process("25C.lib", "25C_MODE_R1K.lib", "MODE_R1K")
+    process(
+        "E34I0_GPIO_AS_I2C_IV83V35V0_FSFR_MV_HVT_CL65CUP_5M4X0Y0Z_tt40_1.10V_3.30V_25C.lib",
+        "3.lib",
+        "MODE_R1K"
+    )
