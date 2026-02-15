@@ -12,10 +12,6 @@ def write_file(path, content):
 
 
 def extract_block(text, start_index):
-    """
-    Extract full block starting at keyword (internal_power or timing)
-    until matching closing brace.
-    """
     brace_start = text.find("{", start_index)
     if brace_start == -1:
         return None, start_index
@@ -35,20 +31,13 @@ def extract_block(text, start_index):
 
 
 def get_mode(block_text):
-    """
-    Extract mode even if written like:
-    mode(modes,\
-         "MODE_R2P2K");
-    """
     match = re.search(
         r'mode\s*\(\s*modes\s*,\s*\\?\s*"([^"]+)"',
         block_text,
         re.DOTALL
     )
-
     if match:
         return match.group(1).strip()
-
     return None
 
 
@@ -59,33 +48,22 @@ def filter_lib(text, required_mode="MODE_R1K"):
 
     while i < n:
 
-        # Detect internal_power
-        if text.startswith("internal_power", i):
+        if text.startswith("internal_power", i) or text.startswith("timing", i):
+
             block, end_i = extract_block(text, i)
 
             if block:
                 mode = get_mode(block)
 
-                if mode == required_mode:
+                # ✅ Keep if:
+                # - block has no mode()
+                # - OR mode matches required
+                if mode is None or mode == required_mode:
                     output.append(block)
 
                 i = end_i
                 continue
 
-        # Detect timing
-        if text.startswith("timing", i):
-            block, end_i = extract_block(text, i)
-
-            if block:
-                mode = get_mode(block)
-
-                if mode == required_mode:
-                    output.append(block)
-
-                i = end_i
-                continue
-
-        # Normal character
         output.append(text[i])
         i += 1
 
@@ -94,8 +72,8 @@ def filter_lib(text, required_mode="MODE_R1K"):
 
 def process(input_file, output_file, required_mode="MODE_R1K"):
     content = read_file(input_file)
-    filtered_content = filter_lib(content, required_mode)
-    write_file(output_file, filtered_content)
+    filtered = filter_lib(content, required_mode)
+    write_file(output_file, filtered)
     print("Filtering completed successfully.")
 
 
