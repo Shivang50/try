@@ -11,16 +11,17 @@ def write_file(path, content):
         f.write(content)
 
 
-def extract_block(text, start):
+def extract_block(text, start_index):
     """
-    Extract block from keyword start to matching closing brace.
+    Extract full block starting at keyword (internal_power or timing)
+    until matching closing brace.
     """
-    brace_pos = text.find("{", start)
-    if brace_pos == -1:
-        return None, start
+    brace_start = text.find("{", start_index)
+    if brace_start == -1:
+        return None, start_index
 
     depth = 1
-    i = brace_pos + 1
+    i = brace_start + 1
     n = len(text)
 
     while i < n and depth > 0:
@@ -30,17 +31,24 @@ def extract_block(text, start):
             depth -= 1
         i += 1
 
-    return text[start:i], i
+    return text[start_index:i], i
 
 
-def get_mode(block):
+def get_mode(block_text):
+    """
+    Extract mode even if written like:
+    mode(modes,\
+         "MODE_R2P2K");
+    """
     match = re.search(
-        r'mode\s*\(\s*modes\s*,\s*"([^"]+)"\s*\)',
-        block,
+        r'mode\s*\(\s*modes\s*,\s*\\?\s*"([^"]+)"',
+        block_text,
         re.DOTALL
     )
+
     if match:
-        return match.group(1)
+        return match.group(1).strip()
+
     return None
 
 
@@ -52,22 +60,28 @@ def filter_lib(text, required_mode="MODE_R1K"):
     while i < n:
 
         # Detect internal_power
-        if text.startswith("internal_power(", i):
+        if text.startswith("internal_power", i):
             block, end_i = extract_block(text, i)
+
             if block:
                 mode = get_mode(block)
-                if mode is None or mode == required_mode:
+
+                if mode == required_mode:
                     output.append(block)
+
                 i = end_i
                 continue
 
         # Detect timing
-        if text.startswith("timing(", i):
+        if text.startswith("timing", i):
             block, end_i = extract_block(text, i)
+
             if block:
                 mode = get_mode(block)
-                if mode is None or mode == required_mode:
+
+                if mode == required_mode:
                     output.append(block)
+
                 i = end_i
                 continue
 
@@ -80,14 +94,14 @@ def filter_lib(text, required_mode="MODE_R1K"):
 
 def process(input_file, output_file, required_mode="MODE_R1K"):
     content = read_file(input_file)
-    filtered = filter_lib(content, required_mode)
-    write_file(output_file, filtered)
-    print("Done.")
+    filtered_content = filter_lib(content, required_mode)
+    write_file(output_file, filtered_content)
+    print("Filtering completed successfully.")
 
 
 if __name__ == "__main__":
     process(
         "E34I0_GPIO_AS_I2C_IV83V35V0_FSFR_MV_HVT_CL65CUP_5M4X0Y0Z_tt40_1.10V_3.30V_25C.lib",
-        "3.lib",
+        "25C_MODE_R1K.lib",
         "MODE_R1K"
     )
