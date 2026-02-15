@@ -1,3 +1,6 @@
+import re
+
+
 def read_file(path):
     with open(path, "r") as f:
         return f.read()
@@ -8,11 +11,9 @@ def write_file(path, content):
         f.write(content)
 
 
-def extract_block(text, start_index):
+def extract_complete_block(text, start_index):
     """
-    Extract complete block starting from first '{'
-    Handles nested braces correctly.
-    Returns (block_text, end_index)
+    Extract full {...} block safely with nested brace support.
     """
     brace_start = text.find("{", start_index)
     if brace_start == -1:
@@ -31,41 +32,58 @@ def extract_block(text, start_index):
     return text[start_index:i], i
 
 
-def block_has_mode(block_text, required_mode):
+def get_mode_from_block(block_text):
     """
-    Check if block contains exact mode
+    Extract MODE name even if multiline formatted.
     """
-    import re
+    match = re.search(
+        r'mode\s*\(\s*modes\s*,\s*"([^"]+)"\s*\)',
+        block_text,
+        re.DOTALL
+    )
+    if match:
+        return match.group(1)
+    return None
 
-    match = re.search(r'mode\s*\(\s*modes\s*,\s*"(.*?)"\s*\)', block_text)
-    if not match:
-        return False
 
-    return match.group(1) == required_mode
-
-
-def filter_internal_power_blocks(text, required_mode="MODE_R1K"):
+def should_filter_block(text, index):
     """
-    Remove internal_power blocks that don't match required_mode
+    Check if block starting at index is timing() or internal_power()
     """
+    return (
+        text.startswith("internal_power(", index)
+        or text.startswith("timing(", index)
+    )
+
+
+def filter_lib_by_mode(text, required_mode="MODE_R1K"):
     output = []
     i = 0
     n = len(text)
 
     while i < n:
-        # Detect exact keyword
-        if text.startswith("internal_power(", i):
-            block_text, end_index = extract_block(text, i)
+
+        if should_filter_block(text, i):
+
+            block_text, end_index = extract_complete_block(text, i)
 
             if block_text is None:
                 output.append(text[i])
                 i += 1
                 continue
 
-            if block_has_mode(block_text, required_mode):
+            mode_value = get_mode_from_block(block_text)
+
+            # If block has mode and matches → keep
+            if mode_value == required_mode:
                 output.append(block_text)
 
-            # Skip entire block
+            # If block has no mode → keep (important!)
+            elif mode_value is None:
+                output.append(block_text)
+
+            # else → skip block
+
             i = end_index
         else:
             output.append(text[i])
@@ -74,11 +92,11 @@ def filter_internal_power_blocks(text, required_mode="MODE_R1K"):
     return "".join(output)
 
 
-def process_lib(input_path, output_path, required_mode="MODE_R1K"):
-    content = read_file(input_path)
-    filtered = filter_internal_power_blocks(content, required_mode)
-    write_file(output_path, filtered)
-    print("Done. Output written to:", output_path)
+def process_lib(input_file, output_file, required_mode="MODE_R1K"):
+    content = read_file(input_file)
+    filtered = filter_lib_by_mode(content, required_mode)
+    write_file(output_file, filtered)
+    print("Finished filtering:", output_file)
 
 
 if __name__ == "__main__":
