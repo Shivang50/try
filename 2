@@ -1,1 +1,85 @@
-scp saxenas1@10.199.78.191:/work/LIPAT/USER_AREAS/SHIVANG/E3410_GPIO_AS_I2C_1V83V35V0_FSFR_MV_HVT_CL65CUP_5M4X0Y0Z_tt40_1.10V_3.30V_25C.lib ~/Desktop/
+def read_file(path):
+    with open(path, "r") as f:
+        return f.read()
+
+
+def write_file(path, content):
+    with open(path, "w") as f:
+        f.write(content)
+
+
+def extract_block(text, start_index):
+    """
+    Extract complete block starting from first '{'
+    Handles nested braces correctly.
+    Returns (block_text, end_index)
+    """
+    brace_start = text.find("{", start_index)
+    if brace_start == -1:
+        return None, start_index
+
+    stack = 1
+    i = brace_start + 1
+
+    while i < len(text) and stack > 0:
+        if text[i] == "{":
+            stack += 1
+        elif text[i] == "}":
+            stack -= 1
+        i += 1
+
+    return text[start_index:i], i
+
+
+def block_has_mode(block_text, required_mode):
+    """
+    Check if block contains exact mode
+    """
+    import re
+
+    match = re.search(r'mode\s*\(\s*modes\s*,\s*"(.*?)"\s*\)', block_text)
+    if not match:
+        return False
+
+    return match.group(1) == required_mode
+
+
+def filter_internal_power_blocks(text, required_mode="MODE_R1K"):
+    """
+    Remove internal_power blocks that don't match required_mode
+    """
+    output = []
+    i = 0
+    n = len(text)
+
+    while i < n:
+        # Detect exact keyword
+        if text.startswith("internal_power(", i):
+            block_text, end_index = extract_block(text, i)
+
+            if block_text is None:
+                output.append(text[i])
+                i += 1
+                continue
+
+            if block_has_mode(block_text, required_mode):
+                output.append(block_text)
+
+            # Skip entire block
+            i = end_index
+        else:
+            output.append(text[i])
+            i += 1
+
+    return "".join(output)
+
+
+def process_lib(input_path, output_path, required_mode="MODE_R1K"):
+    content = read_file(input_path)
+    filtered = filter_internal_power_blocks(content, required_mode)
+    write_file(output_path, filtered)
+    print("Done. Output written to:", output_path)
+
+
+if __name__ == "__main__":
+    process_lib("25C.lib", "25C_MODE_R1K.lib", "MODE_R1K")
