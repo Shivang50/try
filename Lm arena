@@ -1,108 +1,91 @@
-#!/usr/bin/env python3
-"""
-Filter a Liberty .lib file so that only internal_power() blocks with a desired mode
-(e.g., MODE_R1K) are kept. Everything else is preserved exactly as-is.
-
-Example:
-    python filter_internal_power_mode.py 25C.lib 25C_MODE_R1K.lib --mode MODE_R1K
-"""
-
-from __future__ import annotations
-
 import re
-import argparse
-from typing import Iterable, Iterator, List, Optional, Tuple
+import os
 
 
-# Matches: mode(modes, "MODE_R1K");
-_MODE_RE = re.compile(r'\bmode\s*\(\s*[^,]+,\s*"([^"]+)"\s*\)\s*;')
+def read_file(path):
+    with open(path, "r") as f:
+        return f.read()
 
 
-def extract_mode(block_text: str) -> Optional[str]:
-    """
-    Extract the mode string from an internal_power block text.
-    Returns None if no mode() line is found.
-    """
-    m = _MODE_RE.search(block_text)
-    return m.group(1) if m else None
+def write_file(path, content):
+    with open(path, "w") as f:
+        f.write(content)
 
 
-def read_balanced_block(
-    it: Iterator[str],
-    first_line: str,
-) -> List[str]:
-    """
-    Read a brace-balanced block starting from first_line (which begins the block).
-    Uses simple brace counting across lines: count('{') - count('}').
+def extract_block(text, start_index):
+    brace_start = text.find("{", start_index)
+    if brace_start == -1:
+        return None, start_index
 
-    Returns the list of lines belonging to the full block, inclusive.
-    """
-    lines = [first_line]
-    brace_count = first_line.count("{") - first_line.count("}")
+    depth = 1
+    i = brace_start + 1
+    n = len(text)
 
-    # In rare formatting cases, the opening '{' might appear on later lines.
-    # Continue reading until brace_count returns to 0 *after* we have entered the block.
-    while True:
-        if brace_count == 0 and "{" in "".join(lines):
-            break
-        try:
-            line = next(it)
-        except StopIteration:
-            # Unterminated block; return what we have.
-            break
-        lines.append(line)
-        brace_count += line.count("{") - line.count("}")
+    while i < n and depth > 0:
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+        i += 1
 
-    return lines
+    return text[start_index:i], i
 
 
-def is_internal_power_start(line: str) -> bool:
-    """
-    Detect start of an internal_power block.
-    Typical form: internal_power() {
-    """
-    return bool(re.match(r"^\s*internal_power\s*\(\s*\)\s*\{?", line))
+def get_mode(block_text):
+    match = re.search(
+        r'mode\s*\(\s*modes\s*,\s*\\?\s*"([^"]+)"',
+        block_text,
+        re.DOTALL
+    )
+    if match:
+        return match.group(1).strip()
+    return None
 
 
-def filter_lib_by_internal_power_mode(
-    in_path: str,
-    out_path: str,
-    keep_mode: str = "MODE_R1K",
-) -> None:
-    """
-    Stream-read in_path and write out_path, preserving everything except internal_power blocks
-    whose mode != keep_mode (those blocks are removed entirely).
-    """
-    with open(in_path, "r", encoding="utf-8", errors="replace", newline="") as f_in, \
-         open(out_path, "w", encoding="utf-8", newline="") as f_out:
+def filter_by_mode(text, required_mode):
+    n = len(text)
+    i = 0
+    output = []
 
-        it = iter(f_in)
+    while i < n:
 
-        for line in it:
-            if not is_internal_power_start(line):
-                f_out.write(line)
+        if text.startswith("internal_power", i) or text.startswith("timing", i):
+
+            block, end_i = extract_block(text, i)
+
+            if block:
+                mode = get_mode(block)
+
+                # Keep if:
+                # - No mode (common block)
+                # - OR matches required mode
+                if mode is None or mode == required_mode:
+                    output.append(block)
+
+                i = end_i
                 continue
 
-            # Capture the whole internal_power block
-            block_lines = read_balanced_block(it, line)
-            block_text = "".join(block_lines)
-            mode = extract_mode(block_text)
+        output.append(text[i])
+        i += 1
 
-            # Keep only desired mode
-            if mode == keep_mode:
-                f_out.write(block_text)
-            # else: skip it (write nothing)
+    return "".join(output)
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description="Filter Liberty .lib internal_power blocks by mode.")
-    ap.add_argument("input", help="Input .lib file (e.g., 25C.lib)")
-    ap.add_argument("output", help="Output .lib file (filtered)")
-    ap.add_argument("--mode", default="MODE_R1K", help="Mode to keep (default: MODE_R1K)")
-    args = ap.parse_args()
+def generate_all_modes(input_file):
 
-    filter_lib_by_internal_power_mode(args.input, args.output, keep_mode=args.mode)
+    content = read_file(input_file)
+
+    modes = ["MODE_R1K", "MODE_R2P2K", "MODE_R4K"]
+
+    base_name = os.path.splitext(input_file)[0]
+
+    for mode in modes:
+        filtered_content = filter_by_mode(content, mode)
+        output_file = f"{base_name}_{mode}.lib"
+        write_file(output_file, filtered_content)
+        print(f"Generated: {output_file}")
 
 
 if __name__ == "__main__":
-    main()
+    input_file = "E34I0_GPIO_AS_I2C_IV83V35V0_FSFR_MV_HVT_CL65CUP_5M4X0Y0Z_tt40_1.10V_3.30V_25C.lib"
+    generate_all_modes(input_file)
