@@ -1,108 +1,15 @@
-import re
+mode_definition(modes){
+    mode_value(MODE_R1K){}
+    mode_value(MODE_R2P2K){}
+    mode_value(MODE_R4K){}
+   }
 
 
-def read_file(file_path):
-    """Read entire file content"""
-    with open(file_path, "r") as f:
-        return f.read()
+mode(modes,\
+          "MODE_R1K");
 
+mode(modes,\
+          "MODE_R2P2K");
 
-def write_file(file_path, content):
-    """Write content to file"""
-    with open(file_path, "w") as f:
-        f.write(content)
-
-
-def find_matching_brace(text, start_index):
-    """
-    Given index of '{', find corresponding closing '}'
-    Handles nested braces.
-    """
-    stack = 0
-    for i in range(start_index, len(text)):
-        if text[i] == "{":
-            stack += 1
-        elif text[i] == "}":
-            stack -= 1
-            if stack == 0:
-                return i
-    return -1
-
-
-def extract_internal_power_blocks(text):
-    """
-    Extract all internal_power blocks with their start and end indices
-    """
-    blocks = []
-    pattern = re.compile(r'internal_power\s*\(')
-
-    for match in pattern.finditer(text):
-        start = match.start()
-
-        # Find first '{' after internal_power(...)
-        brace_start = text.find("{", start)
-        if brace_start == -1:
-            continue
-
-        brace_end = find_matching_brace(text, brace_start)
-        if brace_end == -1:
-            continue
-
-        blocks.append((start, brace_end + 1))
-
-    return blocks
-
-
-def filter_blocks(text, keep_mode="MODE_R1K"):
-    """
-    Keep only internal_power blocks that contain specified mode
-    """
-    blocks = extract_internal_power_blocks(text)
-
-    output = []
-    last_index = 0
-
-    for start, end in blocks:
-        block_text = text[start:end]
-
-        # Extract mode
-        mode_match = re.search(r'mode\s*\(\s*modes\s*,\s*"(.*?)"\s*\)', block_text)
-
-        if mode_match:
-            mode_value = mode_match.group(1)
-        else:
-            mode_value = None
-
-        # Add text before this block
-        output.append(text[last_index:start])
-
-        # Keep block only if mode matches
-        if mode_value == keep_mode:
-            output.append(block_text)
-
-        last_index = end
-
-    # Add remaining text after last block
-    output.append(text[last_index:])
-
-    return "".join(output)
-
-
-def process_lib_file(input_path, output_path, keep_mode="MODE_R1K"):
-    """
-    Main processing function
-    """
-    content = read_file(input_path)
-    filtered_content = filter_blocks(content, keep_mode)
-    write_file(output_path, filtered_content)
-    print(f"Filtered file written to: {output_path}")
-
-
-# ===============================
-# Run the script
-# ===============================
-if __name__ == "__main__":
-    input_file = "25C.lib"
-    output_file = "25C_MODE_R1K.lib"
-
-    process_lib_file(input_file, output_file, keep_mode="MODE_R1K")
+mode(modes,\
+          "MODE_R4K");
