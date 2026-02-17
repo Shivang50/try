@@ -1,0 +1,127 @@
+
+import os
+import re
+
+
+def read_file(path):
+    with open(path, "r") as f:
+        return f.read()
+
+
+def write_file(path, content):
+    with open(path, "w") as f:
+        f.write(content)
+
+
+def extract_block(text, start_index):
+    brace_start = text.find("{", start_index)
+    if brace_start == -1:
+        return None, start_index
+
+    depth = 1
+    i = brace_start + 1
+    n = len(text)
+
+    while i < n and depth > 0:
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+        i += 1
+
+    return text[start_index:i], i
+
+
+def get_mode(block_text):
+    match = re.search(
+        r'mode\s*\(\s*modes\s*,\s*\\?\s*"([^"]+)"',
+        block_text,
+        re.DOTALL
+    )
+    if match:
+        return match.group(1).strip()
+    return None
+
+
+def filter_by_mode(text, required_mode):
+    n = len(text)
+    i = 0
+    output = []
+
+    while i < n:
+
+        if text.startswith("internal_power", i) or text.startswith("timing", i):
+
+            block, end_i = extract_block(text, i)
+
+            if block:
+                mode = get_mode(block)
+
+                if mode is None or mode == required_mode:
+                    output.append(block)
+
+                i = end_i
+                continue
+
+        output.append(text[i])
+        i += 1
+
+    return "".join(output)
+
+
+def remove_mode_definitions(text):
+
+    n = len(text)
+    i = 0
+    output = []
+
+    while i < n:
+
+        if text.startswith("mode_definition", i):
+            block, end_i = extract_block(text, i)
+            if block:
+                i = end_i
+                continue
+
+        output.append(text[i])
+        i += 1
+
+    cleaned_text = "".join(output)
+
+    cleaned_text = re.sub(
+        r'mode\s*\(\s*modes\s*,\s*\\?\s*"[^"]+"\s*\)\s*;',
+        '',
+        cleaned_text,
+        flags=re.DOTALL
+    )
+
+    return cleaned_text
+
+
+# 🔥 UPDATED FUNCTION WITH DIRECTORIES
+def generate_all_modes(input_file):
+
+    content = read_file(input_file)
+
+    modes = ["MODE_R1K", "MODE_R2P2K", "MODE_R4K"]
+
+    base_name = os.path.splitext(os.path.basename(input_file))[0]
+
+    for mode in modes:
+
+        # Create directory if not exists
+        os.makedirs(mode, exist_ok=True)
+
+        filtered = filter_by_mode(content, mode)
+        cleaned = remove_mode_definitions(filtered)
+
+        output_file = os.path.join(mode, f"{base_name}_{mode}.lib")
+
+        write_file(output_file, cleaned)
+
+        print(f"Generated: {output_file}")
+
+
+if __name__ == "__main__":
+    input_file = "E34I0_GPIO_AS_I2C_IV83V35V0_FSFR_MV_HVT_CL65CUP_5M4X0Y0Z_tt40_1.10V_3.30V_25C.lib"
+    generate_all_modes(input_file)
