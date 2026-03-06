@@ -1,15 +1,22 @@
+import os
 import re
+import sys
+
+# FILE READ
 
 
 def read_file(path):
     with open(path, "r") as f:
         return f.read()
 
+# FILE WRITE
 
 def write_file(path, content):
     with open(path, "w") as f:
         f.write(content)
 
+
+# BLOCK EXTRACTION
 
 def extract_block(text, start_index):
     brace_start = text.find("{", start_index)
@@ -30,6 +37,8 @@ def extract_block(text, start_index):
     return text[start_index:i], i
 
 
+# MODE EXTRACTION
+
 def get_mode(block_text):
     match = re.search(
         r'mode\s*\(\s*modes\s*,\s*\\?\s*"([^"]+)"',
@@ -41,7 +50,10 @@ def get_mode(block_text):
     return None
 
 
-def filter_lib(text, required_mode="MODE_R1K"):
+
+# FILTERING 
+
+def filter_by_mode(text, required_mode):
     n = len(text)
     i = 0
     output = []
@@ -55,9 +67,6 @@ def filter_lib(text, required_mode="MODE_R1K"):
             if block:
                 mode = get_mode(block)
 
-                # ✅ Keep if:
-                # - block has no mode()
-                # - OR mode matches required
                 if mode is None or mode == required_mode:
                     output.append(block)
 
@@ -70,16 +79,108 @@ def filter_lib(text, required_mode="MODE_R1K"):
     return "".join(output)
 
 
-def process(input_file, output_file, required_mode="MODE_R1K"):
+# REMOVE MODE DEFINITIONS
+
+def remove_mode_definitions(text):
+
+    n = len(text)
+    i = 0
+    output = []
+
+    while i < n:
+
+        if text.startswith("mode_definition", i):
+            block, end_i = extract_block(text, i)
+            if block:
+                i = end_i
+                continue
+
+        output.append(text[i])
+        i += 1
+
+    cleaned_text = "".join(output)
+
+    cleaned_text = re.sub(
+        r'mode\s*\(\s*modes\s*,\s*\\?\s*"[^"]+"\s*\)\s*;',
+        '',
+        cleaned_text,
+        flags=re.DOTALL
+    )
+
+    return cleaned_text
+
+
+
+# TO PROCESS ONE FILE
+
+def generate_all_modes(input_file):
+
+    print(f"\nProcessing: {input_file}")
+
     content = read_file(input_file)
-    filtered = filter_lib(content, required_mode)
-    write_file(output_file, filtered)
-    print("Filtering completed successfully.")
+    modes = ["MODE_R1K", "MODE_R2P2K", "MODE_R4K"]
+    base_name = os.path.splitext(os.path.basename(input_file))[0]
+
+    for mode in modes:
+
+        os.makedirs(mode, exist_ok=True)
+
+        filtered = filter_by_mode(content, mode)
+        cleaned = remove_mode_definitions(filtered)
+
+        output_file = os.path.join(mode, f"{base_name}_{mode}.lib")
+
+        write_file(output_file, cleaned)
+
+        print(f"Generated: {output_file}")
+
+
+
+def main():
+
+    print("Select input type:")
+    print("1  Single .lib file")
+    print("2. Directory containing .lib files")
+
+    choice = input("Enter 1 or 2: ").strip()
+
+    if choice == "1":
+
+        file_input = input("Enter .lib file path: ").strip()
+
+        
+        file_path = os.path.abspath(os.path.expanduser(file_input))
+
+        if not os.path.isfile(file_path):
+            print("ERROR: File not found.")
+            return
+
+        generate_all_modes(file_path)
+
+    elif choice == "2":
+
+        dir_input = input("Enter directory path: ").strip()
+
+        
+        dir_path = os.path.abspath(os.path.expanduser(dir_input))
+
+        if not os.path.isdir(dir_path):
+            print("ERROR: Directory not found.")
+            return
+
+        lib_files = [f for f in os.listdir(dir_path) if f.endswith(".lib")]
+
+        if not lib_files:
+            print("No .lib files found in directory.")
+            return
+
+        for file_name in lib_files:
+            full_path = os.path.join(dir_path, file_name)
+            generate_all_modes(full_path)
+
+    else:
+        print("Invalid choice.")
 
 
 if __name__ == "__main__":
-    process(
-        "E34I0_GPIO_AS_I2C_IV83V35V0_FSFR_MV_HVT_CL65CUP_5M4X0Y0Z_tt40_1.10V_3.30V_25C.lib",
-        "25C_MODE_R1K.lib",
-        "MODE_R1K"
-    )
+    main()
