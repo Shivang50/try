@@ -1,0 +1,19 @@
+def extract_modes(text):
+
+    start = text.find("mode_definition")
+
+    if start == -1:
+        print("ERROR: mode_definition block not found")
+        return []
+
+    block, _ = extract_block(text, start)
+
+    if not block:
+        return []
+
+    modes = re.findall(
+        r'mode_value\s*\(\s*([A-Za-z0-9_]+)\s*\)',
+        block
+    )
+
+    return modes
