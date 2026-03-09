@@ -1,0 +1,312 @@
+import os
+import re
+import gzip
+import shutil
+import traceback
+from datetime import datetime
+
+
+LOG_FILE = "process_lib_log.txt"
+
+
+# -----------------------------------
+# LOGGING FUNCTION
+# -----------------------------------
+def log_message(message):
+
+    with open(LOG_FILE, "a") as log:
+        log.write(message + "\n")
+
+
+# -----------------------------------
+# READ FILE
+# -----------------------------------
+def read_file(path):
+
+    try:
+        if path.endswith(".gz"):
+            with gzip.open(path, "rt") as f:
+                return f.read()
+
+        else:
+            with open(path, "r") as f:
+                return f.read()
+
+    except Exception as e:
+        raise RuntimeError(f"read_file failed: {str(e)}")
+
+
+# -----------------------------------
+# WRITE FILE
+# -----------------------------------
+def write_file(path, content):
+
+    try:
+        with open(path, "w") as f:
+            f.write(content)
+
+    except Exception as e:
+        raise RuntimeError(f"write_file failed: {str(e)}")
+
+
+# -----------------------------------
+# GZIP FILE
+# -----------------------------------
+def gzip_file(file_path):
+
+    try:
+        gz_path = file_path + ".gz"
+
+        with open(file_path, "rb") as f_in:
+            with gzip.open(gz_path, "wb") as f_out:
+                shutil.copyfileobj(f_in, f_out)
+
+        os.remove(file_path)
+
+    except Exception as e:
+        raise RuntimeError(f"gzip_file failed: {str(e)}")
+
+
+# -----------------------------------
+# EXTRACT BLOCK
+# -----------------------------------
+def extract_block(text, start_index):
+
+    brace_start = text.find("{", start_index)
+
+    if brace_start == -1:
+        return None, start_index
+
+    depth = 1
+    i = brace_start + 1
+    n = len(text)
+
+    while i < n and depth > 0:
+
+        if text[i] == "{":
+            depth += 1
+
+        elif text[i] == "}":
+            depth -= 1
+
+        i += 1
+
+    return text[start_index:i], i
+
+
+# -----------------------------------
+# GET MODE
+# -----------------------------------
+def get_mode(block_text):
+
+    match = re.search(
+        r'mode\s*\(\s*modes\s*,\s*\\?\s*"([^"]+)"',
+        block_text,
+        re.DOTALL
+    )
+
+    if match:
+        return match.group(1).strip()
+
+    return None
+
+
+# -----------------------------------
+# EXTRACT MODES
+# -----------------------------------
+def extract_modes(text):
+
+    start = text.find("mode_definition")
+
+    if start == -1:
+        raise RuntimeError("extract_modes failed: mode_definition block not found")
+
+    block, _ = extract_block(text, start)
+
+    if not block:
+        raise RuntimeError("extract_modes failed: unable to parse block")
+
+    modes = re.findall(
+        r'mode_value\s*\(\s*([A-Za-z0-9_]+)\s*\)',
+        block
+    )
+
+    return modes
+
+
+# -----------------------------------
+# FILTER BY MODE
+# -----------------------------------
+def filter_by_mode(text, required_mode):
+
+    try:
+        n = len(text)
+        i = 0
+        output = []
+
+        while i < n:
+
+            if text.startswith("internal_power", i) or text.startswith("timing", i):
+
+                block, end_i = extract_block(text, i)
+
+                if block:
+
+                    mode = get_mode(block)
+
+                    if mode is None or mode == required_mode:
+                        output.append(block)
+
+                    i = end_i
+                    continue
+
+            output.append(text[i])
+            i += 1
+
+        return "".join(output)
+
+    except Exception as e:
+        raise RuntimeError(f"filter_by_mode failed: {str(e)}")
+
+
+# -----------------------------------
+# REMOVE MODE DEFINITIONS
+# -----------------------------------
+def remove_mode_definitions(text):
+
+    try:
+        n = len(text)
+        i = 0
+        output = []
+
+        while i < n:
+
+            if text.startswith("mode_definition", i):
+
+                block, end_i = extract_block(text, i)
+
+                if block:
+                    i = end_i
+                    continue
+
+            output.append(text[i])
+            i += 1
+
+        cleaned = "".join(output)
+
+        cleaned = re.sub(
+            r'mode\s*\(\s*modes\s*,\s*\\?\s*"[^"]+"\s*\)\s*;',
+            "",
+            cleaned,
+            flags=re.DOTALL
+        )
+
+        return cleaned
+
+    except Exception as e:
+        raise RuntimeError(f"remove_mode_definitions failed: {str(e)}")
+
+
+# -----------------------------------
+# PROCESS ONE FILE
+# -----------------------------------
+def generate_all_modes(input_file):
+
+    log_message(f"\nProcessing file: {input_file}")
+
+    try:
+
+        content = read_file(input_file)
+
+        modes = extract_modes(content)
+
+        if not modes:
+            raise RuntimeError("No modes detected")
+
+        base_name = os.path.basename(input_file)
+        base_name = base_name.replace(".lib.gz", "").replace(".lib", "")
+
+        for mode in modes:
+
+            os.makedirs(mode, exist_ok=True)
+
+            filtered = filter_by_mode(content, mode)
+
+            cleaned = remove_mode_definitions(filtered)
+
+            output_file = os.path.join(mode, f"{base_name}_{mode}.lib")
+
+            write_file(output_file, cleaned)
+
+            gzip_file(output_file)
+
+        log_message("Status: SUCCESS")
+
+    except Exception as e:
+
+        log_message("Status: FAILED")
+        log_message(f"Reason: {str(e)}")
+        log_message(traceback.format_exc())
+
+
+# -----------------------------------
+# MAIN
+# -----------------------------------
+def main():
+
+    # overwrite log file every run
+    with open(LOG_FILE, "w") as log:
+        log.write("========== LIB PROCESS LOG ==========\n")
+        log.write(str(datetime.now()) + "\n\n")
+
+    print("\nSelect input type:")
+    print("1  Single file (.lib or .lib.gz)")
+    print("2  Directory containing files")
+
+    choice = input("\nEnter 1 or 2: ").strip()
+
+    if choice == "1":
+
+        file_input = input("Enter file path: ").strip()
+
+        file_path = os.path.abspath(os.path.expanduser(file_input))
+
+        if not os.path.isfile(file_path):
+            print("File not found")
+            return
+
+        generate_all_modes(file_path)
+
+    elif choice == "2":
+
+        dir_input = input("Enter directory path: ").strip()
+
+        dir_path = os.path.abspath(os.path.expanduser(dir_input))
+
+        if not os.path.isdir(dir_path):
+            print("Directory not found")
+            return
+
+        files = os.listdir(dir_path)
+
+        lib_files = [
+            f for f in files
+            if f.endswith(".lib") or f.endswith(".lib.gz")
+        ]
+
+        if not lib_files:
+            print("No lib files found")
+            return
+
+        for file_name in lib_files:
+
+            full_path = os.path.join(dir_path, file_name)
+
+            generate_all_modes(full_path)
+
+    else:
+        print("Invalid choice")
+
+
+if __name__ == "__main__":
+    main()
