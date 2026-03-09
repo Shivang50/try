@@ -13,3 +13,18 @@ mode(modes,\
 
 mode(modes,\
           "MODE_R4K");
+
+
+I need to add a new logic in this code.
+I have some zipped .lib files like: 105C.lib.gz
+So, I need to do the same task on these zipped files which my above code is doing.
+So, for these zipped files: you have to unzip them, then do the same task, at last zip them again.
+
+This directory contains the zipped .lib files that is .lib.gz
+So if i give the directory path that is: /prj/drr_internal_areas_2025_1/trd_6/module_cache/a5/43/a54364061661ea23a09c1bb6b2fad270/P28_IO_SFFSFR_GPIOI3CI2CSPI_1V21V8_HL_EG_6U1X1T8XLB/1.2.2.4.1.6.2.7.1.5/basedir/ccs
+Then will the code process all the .lib.gz files in it?
+
+can you add one more logic in it:
+I need to create a log file in the present working directory, which contains the information of each file if it is successfully processed or not. (log file data should be overwrite every time we run this code).
+If the file is not successfully processed, then write a generic message for the user to understand what went wrong. Also write which python function does not work on this file, so it will be easy for the developer to understand and debug the error.
+
