@@ -1,0 +1,52 @@
+def show_help():
+
+    print("\n================ LIB MODE FILTER SCRIPT =================\n")
+
+    print("Script Name:")
+    print("   lm4.py\n")
+
+    print("Description:")
+    print("   This script processes Liberty (.lib / .lib.gz) files and")
+    print("   generates separate files for each mode defined in the")
+    print("   mode_definition(modes) block.")
+    print()
+    print("   The script performs the following operations:")
+    print("   1. Reads .lib or .lib.gz files")
+    print("   2. Extracts modes from mode_definition(modes)")
+    print("   3. Filters internal_power() and timing() blocks")
+    print("      according to each mode")
+    print("   4. Removes mode_definition blocks and mode statements")
+    print("   5. Creates separate directories for each mode")
+    print("   6. Writes processed files into those directories")
+    print("   7. Recompresses output if input was .lib.gz")
+    print("   8. Generates a log file for success/failure status\n")
+
+    print("Usage:")
+    print("   python lm4.py")
+    print()
+    print("Example:")
+    print("   python lm4.py")
+    print("   → Script will prompt user to enter file or directory.\n")
+
+    print("Supported Inputs:")
+    print("   .lib files")
+    print("   .lib.gz files")
+    print("   Directory containing multiple .lib or .lib.gz files\n")
+
+    print("Log File:")
+    print("   process_lib_log.txt (created in current working directory)\n")
+
+    print("==========================================================\n")
+
+
+
+
+
+if __name__ == "__main__":
+
+    # If user passed any argument → show help
+    if len(sys.argv) > 1:
+        show_help()
+        sys.exit()
+
+    main()
