@@ -1,0 +1,202 @@
+import urllib3
+import requests
+import hashlib
+import random
+import time
+import sys
+import os
+
+# Disable SSL warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+
+############################################
+# STEP 1 — Read diff lines from out.log
+############################################
+
+def read_diff_lines_from_log(file_path="out.log"):
+    diff_lines = []
+
+    try:
+        full_path = os.path.join(os.getcwd(), file_path)
+
+        if not os.path.exists(full_path):
+            print(f"Error: {file_path} not found in current directory.")
+            sys.exit(1)
+
+        with open(full_path, "r") as file:
+            for line in file:
+                line = line.strip()
+
+                if "differences on lpp:" in line:
+                    diff_lines.append(line)
+
+    except Exception as e:
+        print("Error reading log file:", e)
+        sys.exit(1)
+
+    if not diff_lines:
+        print("No LPP difference lines found in log.")
+        sys.exit(1)
+
+    return diff_lines
+
+
+############################################
+# STEP 2 — Build prompt dynamically
+############################################
+
+def build_prompt(diff_lines):
+
+    base_prompt = (
+        "Given the following layout diff lines "
+        "(e.g., difference on lpp:(\"...\")), "
+        "group by unique LPP and return a Markdown table with columns: "
+        "LPP, meaning, impact on GDS, impact on LEF/abstract, "
+        "impact on extracted netlist, impact on CDL, "
+        "impact on liberty, impact on verilog and a short Notes/Risk; "
+        "here are the diff lines:\n"
+    )
+
+    formatted_lines = "\n".join(diff_lines)
+
+    prompt = base_prompt + formatted_lines
+
+    return prompt
+
+
+############################################
+# STEP 3 — Generate token and call API
+############################################
+
+def generate_token_and_call_api(api_key, client_app_name, prompt):
+
+    service_name = "chat"
+
+    url = "https://api-ai-bridge.st.com/chatgpt/api/client-apps"
+
+    timestamp = int(time.time())
+
+    nonce = random.randint(100000, 999999)
+
+    data = f"{client_app_name}_{service_name}_{api_key}_{timestamp}_{nonce}"
+
+    hash_object = hashlib.sha1(data.encode())
+
+    token = hash_object.hexdigest()
+
+    print("timestamp:", timestamp)
+    print("nonce:", nonce)
+    print("serviceName:", service_name)
+    print("clientAppName:", client_app_name)
+    print("token:", token)
+
+    request_body = {
+        "version": 1,
+        "clientAppName": client_app_name,
+        "service": service_name,
+        "timestamp": timestamp,
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        "temperature": 0,
+        "persona": "NEXA",
+        "responseFormat": "json_object"
+    }
+
+    try:
+
+        response = requests.post(
+            url,
+            json=request_body,
+            headers={
+                "stchatgpt-auth-token": token,
+                "stchatgpt-auth-nonce": str(nonce)
+            },
+            verify=False,
+            timeout=60
+        )
+
+        response.raise_for_status()
+
+        response_json = response.json()
+
+        ########################################
+        # Extract LLM content
+        ########################################
+
+        try:
+
+            content = response_json["choices"][0]["message"]["content"]
+
+            print("\n===== LLM OUTPUT TABLE =====\n")
+
+            print(content)
+
+            ########################################
+            # Optional — Save output to file
+            ########################################
+
+            output_file = "lpp_report.md"
+
+            with open(output_file, "w") as f:
+                f.write(content)
+
+            print("\nSaved output to:", output_file)
+
+        except Exception:
+
+            print("Unexpected response format:")
+
+            print(response_json)
+
+    except requests.exceptions.RequestException as error:
+
+        if error.response is not None:
+            print("Error:", error.response.text)
+        else:
+            print("Error:", error)
+
+
+############################################
+# MAIN EXECUTION
+############################################
+
+if len(sys.argv) != 3:
+
+    print("Usage: python script.py <apiKey> <clientAppName>")
+
+    sys.exit(1)
+
+
+api_key = sys.argv[1]
+
+client_app_name = sys.argv[2]
+
+
+############################################
+# Step 1 — Read log file
+############################################
+
+diff_lines = read_diff_lines_from_log()
+
+
+############################################
+# Step 2 — Build prompt
+############################################
+
+prompt = build_prompt(diff_lines)
+
+
+############################################
+# Step 3 — Call API
+############################################
+
+generate_token_and_call_api(
+    api_key,
+    client_app_name,
+    prompt
+)
