@@ -1,0 +1,75 @@
+import urllib3
+import requests
+import hashlib
+import random
+import time
+import sys
+
+
+
+
+# Disable SSL warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+def generate_token_and_call_api(api_key, client_app_name):
+    service_name = "chat"  # Define the service name
+    url = 'https://api-ai-bridge.st.com/chatgpt/api/client-apps'
+
+    timestamp = int(time.time())  # Get the current timestamp in seconds
+    nonce = random.randint(0, 1000000)  # Generate a random nonce
+    data = f"{client_app_name}_{service_name}_{api_key}_{timestamp}_{nonce}"  # Concatenate data for hashing
+
+    # Generate SHA-1 hash of the data
+    hash_object = hashlib.sha1(data.encode())
+    token = hash_object.hexdigest()  # Use the hash as the token
+
+    # Log the generated values for debugging purposes
+    print("timestamp:", timestamp)
+    print("nonce:", nonce)
+    print("serviceName:", service_name)
+    print("clientAppName:", client_app_name)
+    print("token:", token)
+
+    # Define the request body for the API call
+    request_body = {
+        "version": 1,
+        "clientAppName": client_app_name,
+        "service": service_name,
+        "timestamp": timestamp,
+        "messages": [
+            {
+                "role": "user",
+                "content": "What is today's date? You MUST respond in JSON format"
+            }
+        ],
+        "temperature": 1,
+        "persona": "NEXA",
+        "responseFormat": "json_object"
+    }
+
+    try:
+        # Make the API call using requests
+        response = requests.post(
+            url,
+            json=request_body,
+            headers={
+                'stchatgpt-auth-token': token,  # Include the generated token in the headers
+                'stchatgpt-auth-nonce': str(nonce)  # Include the nonce in the headers
+            },
+            verify=False  # Ignore SSL certificate validation
+        )
+        response.raise_for_status()
+        print("Response:", response.json())  # Log the response data
+    except requests.exceptions.RequestException as error:
+        # Log any errors that occur during the API call
+        print("Error:", error.response.json() if error.response else error)
+
+# Example usage from command line:
+if len(sys.argv) != 3:
+    print("Usage: python script.py <apiKey> <clientAppName>")  # Display usage message if arguments are missing
+    sys.exit(1)  # Exit the process with an error code
+
+api_key = sys.argv[1]  # Get the apiKey from the command line arguments
+client_app_name = sys.argv[2]  # Get the clientAppName from the command line arguments
+
+generate_token_and_call_api(api_key, client_app_name)  # Call the function with the provided arguments
