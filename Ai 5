@@ -1,0 +1,28 @@
+try:
+
+    content = response_json.get("completion", "")
+
+    if not content:
+
+        print("Unexpected response format:")
+        print(response_json)
+        return
+
+    # Decode escaped characters
+    content = content.encode().decode("unicode_escape")
+
+    print("\n===== LLM OUTPUT =====\n")
+
+    print(content)
+
+    output_file = "lpp_impact_report.md"
+
+    with open(output_file, "w") as f:
+        f.write(content)
+
+    print("\nSaved output to:", output_file)
+
+except Exception as e:
+
+    print("Error while processing response:")
+    print(e)
