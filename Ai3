@@ -1,0 +1,61 @@
+def read_diff_lines_from_log(file_path="out.log"):
+
+    import re
+
+    unique_lpps = set()
+
+    try:
+
+        full_path = os.path.join(os.getcwd(), file_path)
+
+        if not os.path.exists(full_path):
+            print(f"Error: {file_path} not found in current directory.")
+            sys.exit(1)
+
+        pattern = re.compile(
+            r'difference[s]?\s+on\s+lpp\s*:\s*\("([^"]+)"\s+"([^"]+)"\)',
+            re.IGNORECASE
+        )
+
+        with open(full_path, "r") as file:
+
+            for line in file:
+
+                line = line.strip()
+
+                match = pattern.search(line)
+
+                if match:
+
+                    layer = match.group(1)
+                    purpose = match.group(2)
+
+                    lpp = f'("{layer}" "{purpose}")'
+
+                    # Skip instance drawing
+                    if lpp == '("instance" "drawing")':
+                        continue
+
+                    unique_lpps.add(lpp)
+
+        if not unique_lpps:
+
+            print("No valid LPP differences found.")
+            sys.exit(1)
+
+        # Sort
+        sorted_lpps = sorted(unique_lpps)
+
+        # Rebuild lines
+        diff_lines = [
+            f'differences on lpp:{lpp}'
+            for lpp in sorted_lpps
+        ]
+
+        return diff_lines
+
+    except Exception as e:
+
+        print("Error reading log file:", e)
+
+        sys.exit(1)
