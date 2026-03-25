@@ -73,3 +73,11 @@ api_key = sys.argv[1]  # Get the apiKey from the command line arguments
 client_app_name = sys.argv[2]  # Get the clientAppName from the command line arguments
 
 generate_token_and_call_api(api_key, client_app_name)  # Call the function with the provided arguments
+
+
+
+
+
+Given the following layout diff lines (e.g., difference on lpp:("...")), group by unique LPP and return a Markdown table with columns: LPP, meaning, impact on GDS, impact on LEF/abstract, impact on extracted netlist, impact on CDL, impact on liberty, impact on verilog and a short Notes/Risk; here are the diff lines:
+\o differences on lpp:("instance" "drawing")
+\o differences on lpp:("MKR" "mvres")
