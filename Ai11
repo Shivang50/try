@@ -1,0 +1,165 @@
+def generate_token_and_call_api(
+    api_key,
+    client_app_name,
+    prompt
+):
+
+    service_name = "chat"
+
+    url = (
+        "https://api-ai-bridge.st.com/"
+        "chatgpt/api/client-apps"
+    )
+
+    timestamp = int(time.time())
+
+    nonce = random.randint(
+        100000,
+        999999
+    )
+
+    data = (
+        f"{client_app_name}_"
+        f"{service_name}_"
+        f"{api_key}_"
+        f"{timestamp}_"
+        f"{nonce}"
+    )
+
+    hash_object = hashlib.sha1(
+        data.encode()
+    )
+
+    token = hash_object.hexdigest()
+
+    print("\nAPI call details:")
+
+    print("timestamp:", timestamp)
+    print("nonce:", nonce)
+    print("serviceName:", service_name)
+    print("clientAppName:", client_app_name)
+
+    print(
+        "\nPrompt length:",
+        len(prompt)
+    )
+
+    request_body = {
+
+        "version": 1,
+        "clientAppName": client_app_name,
+        "service": service_name,
+        "timestamp": timestamp,
+
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+
+        "temperature": 0,
+        "persona": "NEXA",
+
+        # REQUIRED by your API
+        "responseFormat": "text"
+    }
+
+    MAX_RETRIES = 3
+
+    for attempt in range(MAX_RETRIES):
+
+        try:
+
+            print(
+                f"\nAttempt {attempt + 1} "
+                f"of {MAX_RETRIES}"
+            )
+
+            response = requests.post(
+
+                url,
+
+                json=request_body,
+
+                headers={
+
+                    "stchatgpt-auth-token":
+                        token,
+
+                    "stchatgpt-auth-nonce":
+                        str(nonce)
+
+                },
+
+                verify=False,
+
+                timeout=180
+
+            )
+
+            response.raise_for_status()
+
+            response_json = response.json()
+
+            content = response_json.get(
+                "completion",
+                ""
+            )
+
+            if content:
+
+                print(
+                    "\nResponse received successfully."
+                )
+
+                print(
+                    "\nResponse length:",
+                    len(content)
+                )
+
+                print(
+                    "\n===== LLM OUTPUT =====\n"
+                )
+
+                print(content)
+
+                save_markdown_table_as_csv(
+                    content
+                )
+
+                return
+
+            else:
+
+                print(
+                    "\nEmpty response received."
+                )
+
+        except requests.exceptions.Timeout:
+
+            print(
+                "\nTimeout occurred. "
+                "Retrying..."
+            )
+
+        except requests.exceptions.RequestException as error:
+
+            print(
+                "\nRequest failed:",
+                error
+            )
+
+        if attempt < MAX_RETRIES - 1:
+
+            print(
+                "Waiting 5 seconds "
+                "before retry..."
+            )
+
+            time.sleep(5)
+
+    print(
+        "\nAll retries failed. "
+        "Exiting."
+    )
