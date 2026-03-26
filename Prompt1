@@ -1,0 +1,56 @@
+def build_prompt(diff_lines):
+
+    base_prompt = (
+
+        "You are an expert in semiconductor layout analysis.\n\n"
+
+        "Given the following layout diff lines "
+        "(difference on lpp:(\"layer\" \"purpose\")), "
+        "create a structured table describing the impact of each LPP.\n\n"
+
+        "IMPORTANT OUTPUT RULES:\n"
+
+        "1. Return ONLY a Markdown table.\n"
+        "2. Do NOT write explanations outside the table.\n"
+        "3. For every impact column, ALWAYS start the cell with either:\n"
+        "   Yes - explanation\n"
+        "   No - explanation\n"
+        "4. Never use synonyms like:\n"
+        "   None\n"
+        "   N/A\n"
+        "   Not applicable\n"
+        "   Possibly\n"
+        "   Maybe\n"
+        "5. Even if there is no impact, write:\n"
+        "   No - <reason>\n"
+        "6. Every impact column MUST begin with exactly:\n"
+        "   Yes\n"
+        "   or\n"
+        "   No\n"
+        "7. Always provide a short explanation after Yes or No.\n"
+        "8. Do not leave any cell blank.\n\n"
+
+        "Required column format example:\n"
+
+        "| Impact on GDS |\n"
+        "| Yes - geometry changes will appear in the final layout |\n"
+        "| No - this layer is not exported to GDS |\n\n"
+
+        "Table columns must be exactly:\n"
+
+        "LPP | Meaning | "
+        "Impact on GDS | "
+        "Impact on LEF/abstract | "
+        "Impact on extracted netlist | "
+        "Impact on CDL | "
+        "Impact on liberty | "
+        "Impact on verilog | "
+        "Notes/Risk\n\n"
+
+        "Here are the diff lines:\n"
+
+    )
+
+    formatted_lines = "\n".join(diff_lines)
+
+    return base_prompt + formatted_lines
