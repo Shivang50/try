@@ -1,0 +1,328 @@
+import urllib3
+import requests
+import hashlib
+import random
+import time
+import sys
+import os
+import re
+
+# Disable SSL warnings
+urllib3.disable_warnings(
+    urllib3.exceptions.InsecureRequestWarning
+)
+
+##################################################
+# STEP 1 — Read, filter, unique, sort LPP lines
+##################################################
+
+def read_diff_lines_from_log(file_path="out.log"):
+
+    unique_lpps = set()
+
+    try:
+
+        full_path = os.path.join(
+            os.getcwd(),
+            file_path
+        )
+
+        if not os.path.exists(full_path):
+
+            print(
+                f"Error: {file_path} not found "
+                "in current directory."
+            )
+
+            sys.exit(1)
+
+        pattern = re.compile(
+            r'difference[s]?\s+on\s+lpp\s*:\s*\("([^"]+)"\s+"([^"]+)"\)',
+            re.IGNORECASE
+        )
+
+        with open(full_path, "r") as file:
+
+            for line in file:
+
+                line = line.strip()
+
+                match = pattern.search(line)
+
+                if match:
+
+                    layer = match.group(1).strip()
+                    purpose = match.group(2).strip()
+
+                    # Exclude instance drawing
+                    if (
+                        layer.lower() == "instance"
+                        and purpose.lower() == "drawing"
+                    ):
+                        continue
+
+                    unique_lpps.add(
+                        (layer, purpose)
+                    )
+
+        if not unique_lpps:
+
+            print(
+                "No valid LPP differences found."
+            )
+
+            sys.exit(1)
+
+        # Sort by layer then purpose
+        sorted_lpps = sorted(unique_lpps)
+
+        diff_lines = [
+
+            f'difference on lpp:("{layer}" "{purpose}")'
+
+            for layer, purpose
+            in sorted_lpps
+        ]
+
+        print(
+            "\nTotal unique LPPs:",
+            len(diff_lines)
+        )
+
+        return diff_lines
+
+    except Exception as e:
+
+        print(
+            "Error reading log file:",
+            e
+        )
+
+        sys.exit(1)
+
+
+##################################################
+# STEP 2 — Build prompt
+##################################################
+
+def build_prompt(diff_lines):
+
+    base_prompt = (
+
+        "Given the following layout diff lines "
+        "(e.g., difference on lpp:(\"...\")), "
+        "group by unique LPP and return a Markdown table "
+        "with columns: "
+        "LPP, meaning, impact on GDS, "
+        "impact on LEF/abstract, "
+        "impact on extracted netlist, "
+        "impact on CDL, "
+        "impact on liberty, "
+        "impact on verilog and a short Notes/Risk; "
+        "here are the diff lines:\n"
+
+    )
+
+    formatted_lines = "\n".join(
+        diff_lines
+    )
+
+    prompt = base_prompt + formatted_lines
+
+    return prompt
+
+
+##################################################
+# STEP 3 — Generate token and call API
+##################################################
+
+def generate_token_and_call_api(
+    api_key,
+    client_app_name,
+    prompt
+):
+
+    service_name = "chat"
+
+    url = (
+        "https://api-ai-bridge.st.com/"
+        "chatgpt/api/client-apps"
+    )
+
+    timestamp = int(time.time())
+
+    nonce = random.randint(
+        100000,
+        999999
+    )
+
+    data = (
+        f"{client_app_name}_"
+        f"{service_name}_"
+        f"{api_key}_"
+        f"{timestamp}_"
+        f"{nonce}"
+    )
+
+    hash_object = hashlib.sha1(
+        data.encode()
+    )
+
+    token = hash_object.hexdigest()
+
+    print("timestamp:", timestamp)
+    print("nonce:", nonce)
+    print("serviceName:", service_name)
+    print("clientAppName:", client_app_name)
+    print("token:", token)
+
+    request_body = {
+
+        "version": 1,
+        "clientAppName": client_app_name,
+        "service": service_name,
+        "timestamp": timestamp,
+
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+
+        "temperature": 0,
+        "persona": "NEXA",
+        "responseFormat": "json_object"
+
+    }
+
+    try:
+
+        response = requests.post(
+
+            url,
+            json=request_body,
+
+            headers={
+
+                "stchatgpt-auth-token": token,
+                "stchatgpt-auth-nonce": str(nonce)
+
+            },
+
+            verify=False,
+            timeout=60
+
+        )
+
+        response.raise_for_status()
+
+        response_json = response.json()
+
+        ##################################################
+        # FIXED RESPONSE PARSING
+        ##################################################
+
+        try:
+
+            content = response_json.get(
+                "completion",
+                ""
+            )
+
+            if not content:
+
+                print(
+                    "Unexpected response format:"
+                )
+
+                print(response_json)
+
+                return
+
+            # Decode escaped characters
+            content = content.encode().decode(
+                "unicode_escape"
+            )
+
+            print(
+                "\n===== LLM OUTPUT =====\n"
+            )
+
+            print(content)
+
+            output_file = (
+                "lpp_impact_report.md"
+            )
+
+            with open(
+                output_file,
+                "w"
+            ) as f:
+
+                f.write(content)
+
+            print(
+                "\nSaved output to:",
+                output_file
+            )
+
+        except Exception as e:
+
+            print(
+                "Error while processing response:"
+            )
+
+            print(e)
+
+    except requests.exceptions.RequestException as error:
+
+        if error.response is not None:
+
+            print(
+                "Error:",
+                error.response.text
+            )
+
+        else:
+
+            print(
+                "Error:",
+                error
+            )
+
+
+##################################################
+# MAIN EXECUTION
+##################################################
+
+if len(sys.argv) != 3:
+
+    print(
+        "Usage: python script.py "
+        "<apiKey> <clientAppName>"
+    )
+
+    sys.exit(1)
+
+
+api_key = sys.argv[1]
+
+client_app_name = sys.argv[2]
+
+
+##################################################
+# Execute pipeline
+##################################################
+
+diff_lines = read_diff_lines_from_log()
+
+prompt = build_prompt(
+    diff_lines
+)
+
+generate_token_and_call_api(
+    api_key,
+    client_app_name,
+    prompt
+)
