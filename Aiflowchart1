@@ -1,0 +1,68 @@
+Start
+  │
+  ▼
+Read command-line inputs
+(apiKey, clientAppName)
+  │
+  ▼
+Locate out.log in current directory
+  │
+  ▼
+Read file line by line
+  │
+  ▼
+Extract lines matching:
+difference on lpp:("layer" "purpose")
+  │
+  ▼
+Remove duplicates
+  │
+  ▼
+Exclude:
+("instance" "drawing")
+  │
+  ▼
+Sort LPPs alphabetically
+(layer → purpose)
+  │
+  ▼
+Build structured prompt
+(add instructions + LPP list)
+  │
+  ▼
+Generate authentication token
+(timestamp + nonce + SHA1)
+  │
+  ▼
+Send API request to LLM
+(responseFormat = text)
+  │
+  ▼
+Receive response from LLM
+  │
+  ▼
+Check if response is empty
+        │
+        ├── Yes → Retry once
+        │
+        └── No
+  │
+  ▼
+Extract Markdown table
+from response
+  │
+  ▼
+Parse table rows
+  │
+  ▼
+Convert table → CSV format
+  │
+  ▼
+Save file:
+lpp_impact_report.csv
+  │
+  ▼
+Print results to terminal
+  │
+  ▼
+End
