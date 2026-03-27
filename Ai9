@@ -14,7 +14,7 @@ urllib3.disable_warnings(
 )
 
 ##################################################
-# STEP 1 — Read, filter, unique, sort LPP lines
+# STEP 1 ? Read, filter, unique, sort LPP lines
 ##################################################
 
 def read_diff_lines_from_log(file_path="out.log"):
@@ -107,7 +107,7 @@ def read_diff_lines_from_log(file_path="out.log"):
 
 
 ##################################################
-# STEP 2 — Build prompt
+# STEP 2 ? Build prompt
 ##################################################
 
 def build_prompt(diff_lines):
@@ -122,7 +122,7 @@ def build_prompt(diff_lines):
 
         "Return ONLY a Markdown table.\n"
         "Do NOT return JSON.\n"
-        "Do NOT return explanations.\n\n"
+        
 
         "Columns must be:\n"
         "LPP | Meaning | Impact on GDS | "
@@ -143,7 +143,7 @@ def build_prompt(diff_lines):
 
 
 ##################################################
-# STEP 3 — Convert Markdown table to CSV
+# STEP 3 ? Convert Markdown table to CSV
 ##################################################
 
 def save_markdown_table_as_csv(content):
@@ -202,7 +202,7 @@ def save_markdown_table_as_csv(content):
 
 
 ##################################################
-# STEP 4 — Generate token and call API
+# STEP 4 ? Generate token and call API
 ##################################################
 
 def generate_token_and_call_api(
@@ -260,10 +260,10 @@ def generate_token_and_call_api(
             }
         ],
 
-        "temperature": 0,
-        "persona": "NEXA",
+        "temperature": 1,
+        "persona": "st_copilot",
 
-        # REQUIRED by your API
+        
         "responseFormat": "text"
     }
 
