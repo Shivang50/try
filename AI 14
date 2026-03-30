@@ -1,0 +1,291 @@
+import urllib3
+import requests
+
+
+# Disable SSL warnings
+urllib3.disable_warnings(
+    urllib3.exceptions.InsecureRequestWarning
+)
+
+
+
+
+
+
+# prompt
+
+def build_prompt(diff_lines):
+
+    base_prompt = (
+
+        "You are an expert in physical design and library QA.
+
+    )
+
+    formatted_lines = "\n".join(diff_lines)
+
+    return base_prompt + formatted_lines
+
+
+
+# Convert Markdown table to CSV
+
+def save_markdown_table_as_csv(content):
+
+    rows = []
+
+    for line in content.splitlines():
+
+        line = line.strip()
+
+        if not line.startswith("|"):
+            continue
+
+        if set(
+            line.replace("|", "").strip()
+        ) == {"-"}:
+            continue
+
+        parts = [
+
+            p.strip()
+
+            for p in line.split("|")
+
+            if p.strip()
+        ]
+
+        if parts:
+            rows.append(parts)
+
+    if not rows:
+
+        print(
+            "\nNo table detected in response."
+        )
+
+        return
+
+    output_file = "lpp_impact_report.csv"
+
+    with open(
+        output_file,
+        "w",
+        newline="",
+        encoding="utf-8"
+    ) as csvfile:
+
+        writer = csv.writer(csvfile)
+
+        writer.writerows(rows)
+
+    print(
+        "\nSaved output to:",
+        output_file
+    )
+
+
+
+# Generate token and call API
+
+def generate_token_and_call_api(
+    api_key,
+    client_app_name,
+    prompt
+):
+
+    service_name = "chat"
+
+    url = (
+        "https://api-ai-bridge.st.com/"
+        "chatgpt/api/client-apps"
+    )
+
+    timestamp = int(time.time())
+
+    nonce = random.randint(
+        100000,
+        999999
+    )
+
+    data = (
+        f"{client_app_name}_"
+        f"{service_name}_"
+        f"{api_key}_"
+        f"{timestamp}_"
+        f"{nonce}"
+    )
+
+    hash_object = hashlib.sha1(
+        data.encode()
+    )
+
+    token = hash_object.hexdigest()
+
+    print("\nAPI call details:")
+
+    print("timestamp:", timestamp)
+    print("nonce:", nonce)
+    print("serviceName:", service_name)
+    print("clientAppName:", client_app_name)
+
+    request_body = {
+
+        "version": 1,
+        "clientAppName": client_app_name,
+        "service": service_name,
+        "timestamp": timestamp,
+
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+
+        "temperature": 1,
+        "persona": "st_copilot",
+
+        
+        "responseFormat": "text"
+    }
+
+    try:
+
+        response = requests.post(
+
+            url,
+
+            json=request_body,
+
+            headers={
+
+                "stchatgpt-auth-token":
+                    token,
+
+                "stchatgpt-auth-nonce":
+                    str(nonce)
+
+            },
+
+            verify=False,
+
+            timeout=60
+        )
+
+        response.raise_for_status()
+
+        response_json = response.json()
+
+        content = response_json.get(
+            "completion",
+            ""
+        )
+
+        
+        # Retry once if empty
+        
+
+        if not content:
+
+            print(
+                "\nLLM returned empty response."
+            )
+
+            print("Retrying once...\n")
+
+            time.sleep(2)
+
+            response = requests.post(
+                url,
+                json=request_body,
+                headers={
+                    "stchatgpt-auth-token": token,
+                    "stchatgpt-auth-nonce": str(nonce)
+                },
+                verify=False,
+                timeout=60
+            )
+
+            response.raise_for_status()
+
+            response_json = response.json()
+
+            content = response_json.get(
+                "completion",
+                ""
+            )
+
+            if not content:
+
+                print(
+                    "\nLLM still returned empty response."
+                )
+
+                print(response_json)
+
+                return
+
+        print(
+            "\nResponse length:",
+            len(content)
+        )
+
+        
+
+        print(content[:500])
+
+        
+
+        print(content)
+
+        save_markdown_table_as_csv(
+            content
+        )
+
+    except requests.exceptions.RequestException as error:
+
+        if error.response is not None:
+
+            print(
+                "\nError:",
+                error.response.text
+            )
+
+        else:
+
+            print(
+                "\nError:",
+                error
+            )
+
+
+
+# MAIN
+
+if len(sys.argv) != 3:
+
+    print(
+        "Usage: python script.py "
+        "<apiKey> <clientAppName>"
+    )
+
+    sys.exit(1)
+
+
+api_key = sys.argv[1]
+
+client_app_name = sys.argv[2]
+
+
+diff_lines = read_diff_lines_from_log()
+
+prompt = build_prompt(
+    diff_lines
+)
+
+generate_token_and_call_api(
+    api_key,
+    client_app_name,
+    prompt
+)
