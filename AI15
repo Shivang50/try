@@ -1,0 +1,1183 @@
+import os
+import glob
+import subprocess
+import sys
+import shutil
+import re
+from pathlib import Path
+import urllib3
+import requests
+import hashlib
+import random
+import time
+import csv
+
+# Disable SSL warnings
+urllib3.disable_warnings(
+    urllib3.exceptions.InsecureRequestWarning
+)
+
+# Create files in the current working directory ($PWD)
+CDS_LIB_PATH = str(Path.cwd() / "cds.lib")
+CDS_LIB_TASK1_PATH = str(Path.cwd() / "cds.lib.task1")
+
+SKILL_1 = "/work/LIPAS2/SHIVAM/SCRIPTS/OA_XOR_scripts/replay1.il"   # e.g. /prj/.../foo.scs
+SKILL_2 = "/work/LIPAS2/SHIVAM/SCRIPTS/OA_XOR_scripts/replay.il"   # e.g. /prj/.../bar.cfg
+
+UPT_BASE = "/work/uptpluscache/areas/trd"
+TOPCELL_FILENAME = "topcell.list"
+TEMPLATE_FILENAME = "user_template"
+OUTLOG_FILENAME = "out.log"
+
+REQUIRED_KEYS = [
+    "Product_name",
+    "MAT10_version",
+    "BE_version or MAT10_2_version",
+	"refspec",
+	"ic",
+	"dpds",
+	"PDK",
+]
+
+def load_ucdprod_env():
+    script_dir = Path(__file__).resolve().parent
+
+    csh_cmd = f"""
+        cd "{script_dir}"
+        setenv UCDPRJDIR $PWD
+        eval `ukerEnv`
+`
+        if ($status != 0) then
+            echo "ERROR: eval `ukerEnv` failed" >&2
+            exit 1
+        endif
+        echo "ucdprod environment loaded successfully."
+        env
+    """
+
+    try:
+        result = subprocess.run(
+            ["csh", "-c", csh_cmd],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except subprocess.CalledProcessError as e:
+        print("Failed to load ucdprod environment.")
+        if e.stderr:
+            print("stderr from csh:\n", e.stderr)
+        sys.exit(1)
+
+    stdout_lines = result.stdout.splitlines()
+    if stdout_lines:
+        # First line is our success message
+        print(stdout_lines[0])
+
+    # Remaining lines: KEY=VALUE
+    for line in stdout_lines[1:]:
+        if "=" in line:
+            key, value = line.split("=", 1)
+            os.environ[key] = value
+
+
+def get_basic_lib_path():
+    """
+    Implements:
+      virtuosoPath=`which virtuoso | cut -d"/" -f1,2,3,4,5,6`
+      basicLibPath="$virtuosoPath/tools.lnx86/dfII/etc/cdslib/basic"
+    Returns the full basicLibPath string, or None if virtuoso is not found.
+    """
+	
+	
+    try:
+        which_res = subprocess.run(
+            ["bash", "-c", "which virtuoso"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True,
+        )
+        virtuoso_full = which_res.stdout.strip()
+        if not virtuoso_full:
+            return None
+    except subprocess.CalledProcessError:
+        return None
+
+    try:
+        cut_res = subprocess.run(
+            ["bash", "-c", f'echo "{virtuoso_full}" | cut -d"/" -f1,2,3,4,5,6'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True,
+        )
+        virtuoso_path = cut_res.stdout.strip()
+        if not virtuoso_path:
+            return None
+    except subprocess.CalledProcessError:
+        return None
+
+    return f"{virtuoso_path}/tools.lnx86/dfII/etc/cdslib/basic"
+
+
+def build_three_lines(libname: str, libpath_for_third: str):
+    """
+    Build the 3 lines that must be written to cds file:
+      1) SOFTINCLUDE <DKITROOT>/
+      2) DEFINE basic <basicLibPath>
+      3) DEFINE <libname> <libpath_for_third>/CADENCE/CDSOA
+    """
+	
+	
+    dkitroot = os.environ.get("DKITROOT")
+    if not dkitroot:
+        raise RuntimeError("DKITROOT is not set in the environment.")
+    pattern = os.path.join(dkitroot, "*.cdslib")
+    matches = glob.glob(pattern)
+
+    if not matches:
+        raise RuntimeError(f"No .cdslib file found under DKITROOT: {pattern}")
+    cdslib_path = matches[0]
+    soft_line = f"SOFTINCLUDE {cdslib_path}\n"
+
+    basic_lib_path = get_basic_lib_path()
+    if not basic_lib_path:
+        raise RuntimeError("Could not determine virtuoso path (basicLibPath).")
+    basic_line = f"DEFINE basic {basic_lib_path}\n"
+
+    #----handling OA and CDSOA-----
+
+
+    cdsoa_path = os.path.join(libpath_for_third, "CADENCE", "CDSOA")
+    oa_path = os.path.join(libpath_for_third, "OA")
+    #oa2_path = os.path.join(libpath_for_third, "CADENCE", "OA")
+
+    if os.path.isdir(cdsoa_path):
+        third_target = cdsoa_path
+    elif os.path.isdir(oa_path):
+        third_target = oa_path
+    #elif os.path.isdir(oa2_path):
+        #third_target = oa2_path
+    else:
+        raise RuntimeError("Could not find valid directory structure")
+
+    third_line = f"DEFINE {libname} {third_target}\n"
+
+    return [soft_line, basic_line, third_line]
+
+def get_techlib():
+    script_dire = Path(__file__).resolve().parent #dir->dire, csh_cmd->csh_cmmd
+ 
+    dkitroot = os.environ.get("DKITROOT")
+    if not dkitroot:
+        raise RuntimeError("PDK not set in environment")
+ 
+    csh_cmmd = f"""
+        cd "{script_dire}"
+        setenv UCDPRJDIR $PWD
+        eval `ukerEnv`
+        if ($status != 0) then
+            echo "ERROR: eval `ukerEnv` failed" >&2
+            exit 1
+        endif
+ 
+        if (! $?DKITROOT) then
+            echo "ERROR: DKITROOT not set after ukerEnv" >&2
+            exit 1
+        endif
+ 
+        set techlib = `piGetInfo "{dkitroot}/" processLibName`
+        if ($status != 0) then
+            echo "ERROR: piGetInfo failed" >&2
+            exit 1
+        endif
+        echo "$techlib"
+    """
+ 
+    try:
+        result = subprocess.run(
+            ["csh", "-c", csh_cmmd],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(
+            "Failed to get techlib via piGetInfo.\n"
+            f"STDOUT:\n{e.stdout}\n"
+            f"STDERR:\n{e.stderr}"
+        ) from e
+ 
+    lines = [ln.strip() for ln in result.stdout.splitlines() if ln.strip()]
+    if not lines:
+        raise RuntimeError(
+            "piGetInfo returned an empty techlib.\n"
+            f"STDOUT:\n{result.stdout}\n"
+            f"STDERR:\n{result.stderr}"
+        )
+ 
+    return lines[-1]
+
+def overwrite_cds_lib(cds_lib_path: str, libname: str, libpath_for_third: str):
+    """Completely overwrite the file (create it if it does not exist)."""
+	
+    lines = build_three_lines(libname, libpath_for_third)
+
+    dir_name = os.path.dirname(cds_lib_path)
+    if dir_name:  # if file is in a subdirectory, ensure it exists
+        os.makedirs(dir_name, exist_ok=True)
+
+    with open(cds_lib_path, "w") as f:
+        f.writelines(lines)
+
+def cp2pwd (skill: str) -> Path:
+    skill_path = Path(skill)
+    if not skill_path.is_file():
+        raise RuntimeError(f"Source file not found: {skill}")
+    dst_path = Path.cwd() / skill_path.name
+    shutil.copy2(skill_path, dst_path)
+    return dst_path
+
+def edit_replay1(path: Path, reflib: str, techlib: str, topcell_list: str):
+    lines = path.read_text().splitlines()
+    new_lines = []
+    reflib_done = False
+    top_done = False
+    tech_done = False
+
+    new_reflib = f'reflib="{reflib}"'
+    new_top = f'topCellList="{topcell_list}"'
+    new_tech = f'techlib="{techlib}"'
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("reflib="):
+            new_lines.append(new_reflib)
+            reflib_done = True
+        elif stripped.startswith("topCellList="):
+            new_lines.append(new_top)
+            top_done = True
+        elif stripped.startswith("techlib="):
+            new_lines.append(new_tech)
+            tech_done = True
+        else:
+            new_lines.append(line)
+
+    if not reflib_done:
+        new_lines.append(new_reflib)
+    if not top_done:
+        new_lines.append(new_top)
+    if not tech_done:
+        new_lines.append(new_tech)
+
+    path.write_text("\n".join(new_lines) + "\n")
+
+def edit_replay(path: Path, reflib: str, topcell_list: str):
+    lines = path.read_text().splitlines()
+    new_lines = []
+    reflib_done = False
+    top_done = False
+    tech_done = False
+
+    new_reflib = f'reflib="{reflib}"'
+    new_top = f'topCellList="{topcell_list}"'
+
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("reflib="):
+            new_lines.append(new_reflib)
+            reflib_done = True
+        elif stripped.startswith("topCellList="):
+            new_lines.append(new_top)
+            top_done = True
+        else:
+            new_lines.append(line)
+
+    if not reflib_done:
+        new_lines.append(new_reflib)
+    if not top_done:
+        new_lines.append(new_top)
+
+    path.write_text("\n".join(new_lines) + "\n")
+
+def run_skill_script(skill_filename: str):
+    skill_path = Path.cwd() / skill_filename
+    if not skill_path.is_file():
+        raise RuntimeError(f"SKILL script not found: {skill_path}")
+    lsf_project = "p18_p3a"
+
+
+
+
+    try:
+        result = subprocess.run(
+            ["bsub", "-P", lsf_project, "-q", "long", "-Ip", "virtuoso", "-nograph", "-replay", str(skill_path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True,
+        )
+    except subprocess.CalledProcessError as e:
+        print(f"Error while running SKILL script {skill_path}:")
+        if e.stderr:
+            print("stderr from reg/virtuoso:\n", e.stderr)
+        raise
+
+
+    print(result.stdout)
+
+def prompt_user_and_create_template(filepath: str):
+    """
+    Ask user for inputs and create user_template file
+    in the exact required format.
+    """
+    print(f"'{TEMPLATE_FILENAME}' not found in current directory.")
+    print("Please enter the details.\n")
+
+    # Ask user to input only values; we fix the keys and format.
+    product_name = input("Product_name (example- abcdef_123): ").strip()
+    mat10_version = input("MAT10_version (example- 1.0.12-1): ").strip()
+    be_or_mat10_2_version = input("BE_version or MAT10_2_version (example- 13-1.0.12): ").strip()
+    pdk = input("PDK (example:PDK_STM_CMOS090A 0.3.1-07): ").strip()
+    version = input("ic (example:ic 23.10.120): ").strip() #change version to ic, and check where variable version is used-----------------------------------
+	
+	
+	
+	
+
+
+    
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(f"Product_name:{product_name}\n")
+        f.write(f"MAT10_version:{mat10_version}\n")
+        f.write(f"BE_version or MAT10_2_version:{be_or_mat10_2_version}\n")
+        f.write(f"PDK:{pdk}\n")
+        f.write(f"ic:{ic}\n")
+
+    print(f"\n'{TEMPLATE_FILENAME}' is created.\n")
+	
+	
+def create_ucdprod_file(refspec_value: str, ic_value: str, dpds_value: str, pdk_value: str):
+    """
+    Create .ucdprod file in current working directory.
+
+    Input format expected:
+        refspec:name version
+        ic:name version
+		dpds:name version
+		PDK:name version
+
+    Output file format:
+        name version
+        
+    """
+
+    cwd = Path.cwd()
+    ucdprod_path = cwd / ".ucdprod"
+
+    try:
+        # Split only once
+        refspec_parts = refspec_value.split(maxsplit=1)
+        ic_parts = ic_value.split(maxsplit=1)
+        dpds_parts = dpds_value.split(maxsplit=1)
+        pdk_parts = pdk_value.split(maxsplit=1)
+
+        if len(refspec_parts) != 2:
+            raise ValueError("refspec must be in format: name version")
+
+        if len(ic_parts) != 2:
+            raise ValueError("ic must be in format: name version")
+			
+        if len(dpds_parts) != 2:
+            raise ValueError("dpds must be in format: name version")
+        if len(pdk_parts) != 2:
+            raise ValueError("PDK must be in format: name version")
+
+        with open(ucdprod_path, "w", encoding="utf-8") as f:
+            f.write(f"{refspec_parts[0]} {refspec_parts[1]}\n")
+            f.write(f"{ic_parts[0]} {ic_parts[1]}\n")
+            f.write(f"{dpds_parts[0]} {dpds_parts[1]}\n")
+            f.write(f"{pdk_parts[0]} {pdk_parts[1]}\n")
+
+        print(f"Created {ucdprod_path}")
+
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to create .ucdprod file: {e}"
+        )
+
+
+def read_user_template():
+    """
+    Ensures 'user_template' exists in current working directory.
+    If not, prompts user for values and creates it.
+
+    Then reads and validates required fields and returns a dict:
+        {
+            "Product_name": "<value>",
+            "MAT10_version": "<value>",
+            "BE_version or MAT10_2_version": "<value>"
+        }
+
+    Raises ValueError if something is missing or invalid.
+    """
+
+    cwd = os.getcwd()
+    filepath = os.path.join(cwd, TEMPLATE_FILENAME)
+
+    # 1. If file missing, prompt user and create it
+    if not os.path.isfile(filepath):
+        prompt_user_and_create_template(filepath)
+
+    # 2. Read file and extract key-value pairs
+    values = {}
+    with open(filepath, "r", encoding="utf-8") as f:
+        for raw_line in f:
+            line = raw_line.strip()#----------------------------------------------------------------------
+            if not line:
+                continue  # ignore empty lines
+
+            if ":" not in line:
+                continue  # ignore malformed lines (no colon)
+
+            key_part, value_part = line.split(":", 1)
+            key = key_part.strip()
+            value = value_part.strip()#------------------------i think it will handle the single or multiple spacing issue of pdk & ic name & version
+
+            if key in REQUIRED_KEYS:
+                values[key] = value
+
+    # 3. Validate presence of all required keys
+    missing_keys = [k for k in REQUIRED_KEYS if k not in values]
+    if missing_keys:
+        raise ValueError(
+            "Missing required fields in 'user_template': "
+            + ", ".join(missing_keys)
+            + "\nExpected lines in the file:\n"
+              "Product_name:<your_product_name>\n"
+              "MAT10_version:<your_mat10_version>\n"
+              "BE_version or MAT10_2_version:<your_be_or_mat10_2_version>"
+        )
+
+    # 4. Validate non-empty values
+    empty_keys = [k for k, v in values.items() if v == ""]
+    if empty_keys:
+        raise ValueError(
+            "The following fields are present but empty in 'user_template': "
+            + ", ".join(empty_keys)
+            + "\nMake sure each line is in the form:\n"
+              "Product_name:abcdef_123\n"
+              "MAT10_version:1.0.12-1\n"
+              "BE_version or MAT10_2_version:13-1.0.12"
+        )
+
+    return values
+
+
+def run_dssc_query(product_name: str, outlog_path: str):
+    """
+    Run the required shell commands:
+      1. source /work/uptplus/uptplus.csh 1
+      2. dssc uptplus query ... -outputfile out.log
+
+    The 'source' must be in the same shell as 'dssc', so we use
+    one shell command string.
+    """
+    # Build the dssc command using the given product_name
+    dssc_cmd = (
+        'dssc uptplus query '
+        '-type "Product Deliverable|Target Version" '
+        f'-where "NAME={product_name}" '
+        '-format csv '
+        '-select "NAME,REVISION" '
+        f'-outputfile "{outlog_path}"'
+    )
+
+    # Full shell command: source env, then run dssc
+    shell_cmd = (
+        'source /work/uptplus/uptplus.csh 1; '
+        + dssc_cmd
+    )
+
+    # Run in a csh-compatible shell; if your environment uses bash, adapt accordingly.
+    # Using shell=True so that 'source' works (it's a shell built-in).
+    result = subprocess.run(
+        shell_cmd,
+        shell=True,
+        executable="/bin/csh",  # adjust if needed (e.g. "/bin/tcsh")
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Failed to run dssc query.\n"
+            f"Command: {shell_cmd}\n"
+            f"stdout:\n{result.stdout}\n"
+            f"stderr:\n{result.stderr}"
+        )
+
+
+def validate_product_and_version_with_outlog(
+    product_name: str, mat10_version: str, outlog_path: str#-----------------------------------------------------check for BE version here-----------------
+):
+    """
+    Read out.log (CSV: NAME,REVISION) and verify that:
+      - product_name exists as NAME
+      - mat10_version matches at least one REVISION for that NAME
+
+    Raises ValueError with a clear error message if validation fails.
+    """
+    if not os.path.isfile(outlog_path):
+        raise ValueError(
+            f"'{OUTLOG_FILENAME}' not found after running dssc query. "
+            "Cannot validate Product_name and MAT10_version."
+        )
+
+    matching_revisions = set()
+    any_name_match = False
+
+    with open(outlog_path, "r", encoding="utf-8") as f:
+        for i, line in enumerate(f):
+            line = line.strip()
+            if not line:
+                continue
+
+            # Skip header line if present
+            if i == 0 and line.upper().startswith("NAME,REVISION"):
+                continue
+
+            parts = line.split(",")
+            if len(parts) < 2:
+                continue  # malformed line, skip
+
+            name = parts[0].strip()
+            revision = parts[1].strip()
+
+            if name == product_name:
+                any_name_match = True
+                matching_revisions.add(revision)
+
+    # Check Product_name present
+    if not any_name_match:
+        raise ValueError(
+            f"Product_name '{product_name}' from '{TEMPLATE_FILENAME}' "
+            f"does not match any NAME entry in '{OUTLOG_FILENAME}'."
+        )
+
+    # Check MAT10_version matches one of the revisions
+    if mat10_version not in matching_revisions:
+        raise ValueError(
+            f"MAT10_version '{mat10_version}'"
+            "is not present in uptplus for Product_name "
+            f"'{product_name}'.\n"
+            f"Available versions for this product: "
+            + (", ".join(sorted(matching_revisions)) if matching_revisions else "<none>")
+        )
+#----------REPLICATION TO BE TESTED--->PENDING------------------
+def replication_check(product_name: str, mat10_version: str) -> bool:
+    rep_path = os.path.join(UPT_BASE, product_name, mat10_version)
+    return os.path.isdir(rep_path)
+
+def replicate_to_upt(product_name: str, mat10_version: str):
+    objurl = (
+        f"sync://uptplus6.gnb.st.com:9006/Modules/"
+        f"{product_name}@{mat10_version}"
+    )
+    cmd_rep = [
+        "bsub", "-q", "reg", "-Ip", "dssc", "uptplus", "replicate", "-attribute", "area trd site noi", "-objurl", objurl,
+    ]
+    print("\nProduct/version not found in uptplus area. Triggering replication....\nPlease wait")
+    print("Command:", " ".join(cmd_rep))
+
+    result = subprocess.run(
+        cmd_rep,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Failed to replicate\n"
+            f"stdout:\n{result.stdout}\n"
+            f"stderr:\n{result.stderr}"
+        )
+    print("Replication completed")
+
+#--------------------------------------------------write function to replicate BE version if not present in uptplus-------------------------------
+
+def derive_libpaths_from_upt(product_name: str, mat10_version: str, be_or_mat10_2_version: str):
+    base = Path(UPT_BASE)
+    libpath1 = base / product_name / mat10_version
+    libpath2 = base / product_name / be_or_mat10_2_version
+    return str(libpath1), str(libpath2)
+
+def parse_bbview(vc_path: Path):
+    if not vc_path.is_file():
+        raise RuntimeError(f"vc.bbview not found: {vc_path}")
+    libname = None
+    topcell = []
+    in_cells_block = False
+
+    with vc_path.open("r", encoding="utf-8") as f:
+        for raw in f:
+            line = raw.strip()
+            if not line:
+                continue
+
+            if line.startswith("LIBRARY "):
+                parts = line.split()
+                if len(parts) >= 2:
+                    libname = parts[1]
+                continue
+
+            if line == "CELLS":
+                in_cells_block = True
+                continue
+
+            if line == "END":
+                in_cells_block = False
+                continue
+
+            if in_cells_block:
+                cell_name = line.split()[0]
+                topcell.append(cell_name)
+
+        if libname is None:
+            raise RuntimeError(f"No LIBRARY name found in {vc_path}")
+        if not topcell:
+            raise RuntimeError(f"No cells found in CELLS block in {vc_path}")
+
+        return libname, topcell
+
+def write_topcell_list(topcell, outputfile: Path):
+    with outputfile.open("w", encoding="utf-8") as f:
+        for name in topcell:
+            f.write(f"{name}\n")
+			
+# Read, filter, sort LPP lines
+def read_diff_lines_from_log(file_path="Diff_Logs/report.log"):
+
+    unique_lpps = set()
+
+    try:
+
+        diff_dir = os.path.join(os.getcwd(), "Diff_Logs")
+        full_path = os.path.join(os.getcwd(), file_path)
+
+        if not os.path.exists(full_path):
+
+            print(
+                f"Error: {file_path} not found "
+                "in current directory."
+            )
+
+            sys.exit(1)
+
+        pattern = re.compile(
+            r'difference[s]?\s+on\s+lpp\s*:\s*\("([^"]+)"\s+"([^"]+)"\)',
+            re.IGNORECASE
+        )
+
+        with open(full_path, "r") as file:
+
+            for line in file:
+
+                line = line.strip()
+
+                match = pattern.search(line)
+
+                if match:
+
+                    layer = match.group(1).strip()
+                    purpose = match.group(2).strip()
+
+                    # Exclude instance drawing
+                    if (
+                        layer.lower() == "instance"
+                        and purpose.lower() == "drawing"
+                    ):
+                        continue
+
+                    unique_lpps.add(
+                        (layer, purpose)
+                    )
+
+        if not unique_lpps:
+
+            print(
+                "No valid LPP differences found."
+            )
+
+            sys.exit(1)
+
+        sorted_lpps = sorted(unique_lpps)
+
+        diff_lines = [
+
+            f'difference on lpp:("{layer}" "{purpose}")'
+
+            for layer, purpose
+            in sorted_lpps
+        ]
+
+        print(
+            "\nTotal unique LPPs:",
+            len(diff_lines)
+        )
+
+        print("\nLPPs being sent to LLM:\n")
+
+        for lpp in diff_lines:
+            print(lpp)
+
+        return diff_lines
+
+    except Exception as e:
+
+        print(
+            "Error reading log file:",
+            e
+        )
+
+        sys.exit(1)
+
+
+
+
+# prompt
+
+def build_prompt(diff_lines):
+
+    base_prompt = (
+
+        "You are an expert in physical design and library QA. I will give you a layout diff report (Calibre/LVS-style) and a detailed per-LPP impact table that you already produced."
+		"Using that information, I want you to summarize the impact at *library level* (not per LPP).\n\nInput context:\n- The diff report lists many `difference on lpp:(\"layer\" \"purpose\")` lines for several cells of the same IO library.\n-"
+		"You previously analyzed each LPP and concluded which views are impacted: GDS/layout, LEF/abstract, extracted netlist, CDL, liberty, and verilog.\n-"
+		"Now we want a single compact summary by view, at library level.\n\nTASK:\n"
+		"1. Create a Markdown table with exactly these columns:\n   - View\n   - Impacted?\n   - Reason / Summary\n\n"
+		"2. For the \"Impacted?\" column, always start with either:\n   - `Yes`\n   - `No`\n   - `No (likely)` if it is not directly impacted but there is some indirect risk.\n\n"
+		"3. In the \"Reason / Summary\" column, give a short, concise explanation in one paragraph per row.\n\n"
+		"4. The views to consider are:\n   - GDS (layout)\n   - LEF / abstract\n   - Extracted netlist (LVS/PEX)\n   - CDL\n   - Liberty\n   - Verilog\n\n"
+		"5. Base your reasoning on typical CMOS IO library flows (GDS \u2192 LEF \u2192 extraction \u2192 CDL \u2192 liberty/verilog), and on how LPP changes affect each view.\n\n"
+		"6. Return ONLY the Markdown table, no extra prose before or after.\n\n"
+		"Here is the diff report (for context):\n[PASTE diff_report.txt CONTENT HERE]\n\n"
+		"Here is the per-LPP analysis you previously produced (for context):\n[PASTE the big LPP impact table HERE]\n\n"
+		"Now generate the requested library-level impact summary table."
+
+    )
+
+    formatted_lines = "\n".join(diff_lines)
+
+    return base_prompt + formatted_lines
+
+
+
+# Convert Markdown table to CSV
+
+def save_markdown_table_as_csv(content):
+
+    rows = []
+
+    for line in content.splitlines():
+
+        line = line.strip()
+
+        if not line.startswith("|"):
+            continue
+
+        if set(
+            line.replace("|", "").strip()
+        ) == {"-"}:
+            continue
+
+        parts = [
+
+            p.strip()
+
+            for p in line.split("|")
+
+            if p.strip()
+        ]
+
+        if parts:
+            rows.append(parts)
+
+    if not rows:
+
+        print(
+            "\nNo table detected in response."
+        )
+
+        return
+
+    output_file = "lpp_impact_report.csv"
+
+    with open(
+        output_file,
+        "w",
+        newline="",
+        encoding="utf-8"
+    ) as csvfile:
+
+        writer = csv.writer(csvfile)
+
+        writer.writerows(rows)
+
+    print(
+        "\nSaved output to:",
+        output_file
+    )
+
+
+
+# Generate token and call API
+
+def generate_token_and_call_api(
+    api_key,
+    client_app_name,
+    prompt
+):
+
+    service_name = "chat"
+
+    url = (
+        "https://api-ai-bridge.st.com/"
+        "chatgpt/api/client-apps"
+    )
+
+    timestamp = int(time.time())
+
+    nonce = random.randint(
+        100000,
+        999999
+    )
+
+    data = (
+        f"{client_app_name}_"
+        f"{service_name}_"
+        f"{api_key}_"
+        f"{timestamp}_"
+        f"{nonce}"
+    )
+
+    hash_object = hashlib.sha1(
+        data.encode()
+    )
+
+    token = hash_object.hexdigest()
+
+    print("\nAPI call details:")
+
+    print("timestamp:", timestamp)
+    print("nonce:", nonce)
+    print("serviceName:", service_name)
+    print("clientAppName:", client_app_name)
+
+    request_body = {
+
+        "version": 1,
+        "clientAppName": client_app_name,
+        "service": service_name,
+        "timestamp": timestamp,
+
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+
+        "temperature": 1,
+        "persona": "st_copilot",
+
+        
+        "responseFormat": "text"
+    }
+
+    try:
+
+        response = requests.post(
+
+            url,
+
+            json=request_body,
+
+            headers={
+
+                "stchatgpt-auth-token":
+                    token,
+
+                "stchatgpt-auth-nonce":
+                    str(nonce)
+
+            },
+
+            verify=False,
+
+            timeout=180
+        )
+
+        response.raise_for_status()
+
+        response_json = response.json()
+
+        content = response_json.get(
+            "completion",
+            ""
+        )
+
+        
+        # Retry once if empty
+        
+
+        if not content:
+
+            print(
+                "\nLLM returned empty response."
+            )
+
+            print("Retrying once...\n")
+
+            time.sleep(2)
+
+            response = requests.post(
+                url,
+                json=request_body,
+                headers={
+                    "stchatgpt-auth-token": token,
+                    "stchatgpt-auth-nonce": str(nonce)
+                },
+                verify=False,
+                timeout=60
+            )
+
+            response.raise_for_status()
+
+            response_json = response.json()
+
+            content = response_json.get(
+                "completion",
+                ""
+            )
+
+            if not content:
+
+                print(
+                    "\nLLM still returned empty response."
+                )
+
+                print(response_json)
+
+                return
+
+        print(
+            "\nResponse length:",
+            len(content)
+        )
+
+        
+
+        print(content[:500])
+
+        
+
+        print(content)
+
+        save_markdown_table_as_csv(
+            content
+        )
+
+    except requests.exceptions.RequestException as error:
+
+        if error.response is not None:
+
+            print(
+                "\nError:",
+                error.response.text
+            )
+
+        else:
+
+            print(
+                "\nError:",
+                error
+            )
+
+
+
+
+
+
+
+
+
+if __name__ == "__main__":
+
+
+
+    try:
+        user_values = read_user_template()
+
+        product_name = user_values["Product_name"]
+        mat10_version = user_values["MAT10_version"]
+        be_or_mat10_2_version = user_values["BE_version or MAT10_2_version"]
+        refspec_value = user_values["refspec"]#------------------------------------------------------------------------------
+        ic_value = user_values["ic"]
+        dpds_value = user_values["dpds"]
+        pdk_value = user_values["PDK"]
+        create_ucdprod_file(refspec_value, ic_value, dpds_value, pdk_value) #---------------------------------------------dpds-----------------------------------------
+		
+        # Load .ucdprod environment
+        load_ucdprod_env()
+
+
+        print("Values read from user_template:")
+        for k, v in user_values.items():
+            print(f"{k}: {v}")
+
+        # Path for out.log (in current working directory)
+        cwd = os.getcwd()
+        outlog_path = os.path.join(cwd, OUTLOG_FILENAME)
+
+        # Run the two commands (source + dssc) and generate out.log
+        run_dssc_query(product_name, outlog_path)
+
+        # Validate against out.log
+        validate_product_and_version_with_outlog(product_name, mat10_version, outlog_path)#-------------------------------------BE check-------
+
+        print("\nValidation successful: Product_name and MAT10_version match out.log.")
+
+        if replication_check(product_name, mat10_version):
+            print(f"\nChecking in uptpluscache area: OK. Product '{product_name}' "
+                  f"version '{mat10_version}' is already present in uptpluscache")
+        else:
+            print(f"\nReplication check: NOT FOUND in '{UPT_BASE}' "
+                  f"for product '{product_name}', version '{mat10_version}'.")
+            replicate_to_upt(product_name, mat10_version)
+
+            # Optional: re-check after replication
+            if replication_check(product_name, mat10_version):
+                print("Replication done")
+            else:
+                print("WARNING: Replication in progress...\nPlease wait ")
+
+
+
+
+    except (ValueError, RuntimeError) as e:
+        print("\nERROR:", e)
+
+
+
+    # 2) Common LIBNAME
+
+    libpath1, libpath2 = derive_libpaths_from_upt(product_name, mat10_version, be_or_mat10_2_version)
+    print("Derived OA library paths:")
+    print(f"  LIBPATH1 (MAT10)  : {libpath1}")
+    print(f"  LIBPATH2 (BE/MAT2): {libpath2}\n")
+
+    vc_path = Path(libpath1) / "packaging" / "vc.bbview"
+    print(f"Reading vc.bbview: {vc_path}")
+    libname, topcell = parse_bbview(vc_path)
+    print(f"LIBNAME from vc.bbview: {libname}")
+    print(f"Number of top cells: {len(topcell)}")
+
+    # 3) Separate LIBPATHs
+    #reflib = input("REFLIBNAME: ").strip()
+    #techlib = input ("techlib: ").strip()
+
+    #techlib = get_techlib()
+    topcell_list = Path.cwd() / TOPCELL_FILENAME
+    write_topcell_list(topcell, topcell_list)
+    print(f"Wrote top cell list to {topcell_list}\n")
+    techlib = get_techlib()
+	
+	
+
+    # 4) Overwrite cds.lib in $PWD
+    overwrite_cds_lib(CDS_LIB_PATH, libname, libpath1)
+
+    # 5) Overwrite cds.lib.task1 in $PWD
+    overwrite_cds_lib(CDS_LIB_TASK1_PATH, libname, libpath2)
+    # 6) Copy two more files from their source location to $PWD and edit them
+    dst1 = cp2pwd(SKILL_1)
+    dst2 = cp2pwd(SKILL_2)
+
+    edit_replay1(dst1, reflib=libname, techlib=techlib, topcell_list=topcell_list)
+    edit_replay(dst2, reflib=libname, topcell_list=topcell_list)
+
+    print(f"Created {CDS_LIB_PATH} and {CDS_LIB_TASK1_PATH} in {os.getcwd()}.")
+    print(f"Ready to run {dst1.name} and {dst2.name} in {os.getcwd()}.")
+    print(f"Creating XORLIB\nPlease wait")
+    run_skill_script("replay1.il")
+    print(f"Comparison in progress\nPlease wait....")
+    run_skill_script("replay.il")
+    print(f"OA XOR completed\nFor reports open Diff_Logs")
+
+    cwd = Path.cwd()
+    diff_dir =cwd / "Diff_Logs"
+    diff_dir.mkdir(parents=True, exist_ok=True)
+
+    log1 = cwd /"create_XORLIB.log"
+    log2 = cwd /"compare_XORLIB.log"
+
+    if log1.exists():
+        shutil.move(str(log1), str(diff_dir / log1.name))
+        #print(f"Moved {log1.name} -> {diff_dir / log1.name}")
+    else:
+        print(f"WARNING: {log1} not found; nothing to move")
+
+    if log2.exists():
+        shutil.move(str(log2), str(diff_dir / log2.name))
+        #print(f"Moved {log2.name} -> {diff_dir / log2.name}")
+    else:
+        print(f"WARNING: {log2} not found; nothing to move")
+
+    summ_log = diff_dir / "summary.log"
+    log2_path = diff_dir / "compare_XORLIB.log"
+    text = log2_path.read_text()
+    pattern_1 = r"\(\(\s*([+-]?\d+(?:\.\d+)?)\s+([+-]?\d+(?:\.\d+)?)\s*\)\s*\(\s*([+-]?\d+(?:\.\d+)?)\s+([+-]?\d+(?:\.\d+)?)\s*\)\s*\)"
+    text = re.sub(pattern_1, "", text)
+    pattern_2 = r"^\s*$\n?"
+    text = re.sub(pattern_2, "", text, flags=re.MULTILINE)
+    summ_log.write_text(text)
+    print(f"Created summary.log")
+
+    report_log = diff_dir / "report.log"
+
+    try:
+        text =summ_log.read_text()
+    except FileNotFoundError:
+        print(f"WARNING: {summ_log} not found; report.log not created")
+    else:
+        lines = []
+
+        for line in text.splitlines():
+            if line.startswith("Comparing Lib:") or line.startswith("difference on lpp:"):
+                line = re.sub(r'difference on lpp:\("instance" "drawing"\)', "", line)
+                if line.strip():
+                    lines.append(line)
+
+        if lines:
+            out_text = "\n".join(lines) + "\n"
+            report_log.write_text(out_text)
+            print("Created report.log")
+            diff_lines = read_diff_lines_from_log()
+            api_key = "6a932be7-e056-4d4f-b4a5-78f7459057e2"
+
+            client_app_name = "gtrd_library_cad_eda_management"
+
+
+            prompt = build_prompt(diff_lines)
+
+            generate_token_and_call_api(api_key,client_app_name,prompt)
+        else:
+            print(f"WARNING: {summ_log} not found; report.log not created")
+
+
