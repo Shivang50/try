@@ -1,0 +1,43 @@
+# Move Diff_Logs into intermediate_logs
+
+src = diff_dir
+dst = intermediate_dir / "Diff_Logs"
+
+if src.exists():
+
+    if dst.exists():
+        shutil.rmtree(dst)
+
+    shutil.move(str(src), str(dst))
+
+    print("Moved Diff_Logs to intermediate_logs")
+
+items_to_move = [
+    "cds.lib",
+    "cds.lib.task1",
+    "menus",
+    "nominal",
+    "out.log",
+    "replay1.il",
+    "replay.il",
+    "Summary.txt",
+    "topcell.list",
+    "uk-init.il",
+    "XORLIB"
+]
+
+for item in items_to_move:
+
+    src = cwd / item
+    dst = intermediate_dir / item
+
+    if src.exists():
+
+        if dst.exists():
+
+            if dst.is_dir():
+                shutil.rmtree(dst)
+            else:
+                dst.unlink()
+
+        shutil.move(str(src), str(dst))
