@@ -1,0 +1,101 @@
+def wait_for_replication(
+    product_name: str,
+    version: str,
+    check_interval: int = 60,
+    timeout: int = 1800
+):
+    """
+    Ensure product/version is available in uptpluscache.
+
+    - Calls replicate_to_upt() only once
+    - Then checks every `check_interval` seconds
+    - Stops when replication is complete
+    - Raises error if timeout exceeded
+
+    Default:
+        check every 60 seconds
+        timeout after 30 minutes
+    """
+
+    start_time = time.time()
+
+    print(
+        f"\nReplication check: NOT FOUND in '{UPT_BASE}' "
+        f"for product '{product_name}', version '{version}'."
+    )
+
+    # ---- Call replication ONLY ONCE ----
+    replicate_to_upt(product_name, version)
+
+    print(
+        "\nWaiting for replication to complete..."
+    )
+
+    while True:
+
+        # Check again
+        if replication_check(product_name, version):
+
+            print(
+                f"\nReplication completed successfully for "
+                f"'{product_name}' version '{version}'."
+            )
+
+            return
+
+        elapsed = int(time.time() - start_time)
+
+        if elapsed >= timeout:
+
+            raise RuntimeError(
+                f"Timeout: replication not completed after "
+                f"{timeout // 60} minutes for "
+                f"{product_name} {version}"
+            )
+
+        remaining = timeout - elapsed
+
+        print(
+            f"Still waiting... "
+            f"checked after {elapsed // 60} minute(s). "
+            f"Next check in {check_interval} seconds."
+        )
+
+        time.sleep(check_interval)
+
+
+
+if replication_check(product_name, mat10_version):
+
+    print(
+        f"\nChecking in uptpluscache area: OK. "
+        f"Product '{product_name}' version "
+        f"'{mat10_version}' is already present "
+        "in uptpluscache"
+    )
+
+else:
+
+    wait_for_replication(
+        product_name,
+        mat10_version
+    )
+
+
+
+if replication_check(product_name, be_or_mat10_2_version):
+
+    print(
+        f"\nChecking in uptpluscache area: OK. "
+        f"Product '{product_name}' version "
+        f"'{be_or_mat10_2_version}' is already present "
+        "in uptpluscache"
+    )
+
+else:
+
+    wait_for_replication(
+        product_name,
+        be_or_mat10_2_version
+    )
+
