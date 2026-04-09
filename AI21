@@ -1,0 +1,138 @@
+def replication_check(product_name: str, mat10_version: str) -> bool:
+    rep_path = os.path.join(UPT_BASE, product_name, mat10_version)
+    return os.path.isdir(rep_path)
+
+def replicate_to_upt(product_name: str, mat10_version: str):
+    objurl = (
+        f"sync://uptplus6.gnb.st.com:9006/Modules/"
+        f"{product_name}@{mat10_version}"
+    )
+    
+    
+    dssc_rep = (
+        'bsub -P p18_p3a -q reg -I '
+        'dssc uptplus replicate '
+        "-attribute 'area trd site noi' "
+        f'-objurl "{objurl}"'
+    )
+	
+    shell_rep = (
+        'source /work/uptplus/uptplus.csh 1; '
+        + dssc_rep
+    )
+    print("\nProduct/version not found in uptplus area. Triggering replication....\nPlease wait")
+    print("Command:", shell_rep)
+
+    # Run in a csh-compatible shell; if your environment uses bash, adapt accordingly.
+    # Using shell=True so that 'source' works (it's a shell built-in).
+    result = subprocess.run(
+        shell_rep,
+        shell=True,
+        executable="/bin/csh",  # adjust if needed (e.g. "/bin/tcsh")
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Failed to run dssc query.\n"
+            f"Command: {shell_rep}\n"
+            f"stdout:\n{result.stdout}\n"
+            f"stderr:\n{result.stderr}"
+        )
+    print("Replication completed")
+
+
+
+def validate_product_and_version_with_outlog(
+    product_name: str, mat10_version: str, outlog_path: str
+):
+    """
+    Read out.log (CSV: NAME,REVISION) and verify that:
+      - product_name exists as NAME
+      - mat10_version matches at least one REVISION for that NAME
+
+    Raises ValueError with a clear error message if validation fails.
+    """
+    if not os.path.isfile(outlog_path):
+        raise ValueError(
+            f"'{OUTLOG_FILENAME}' not found after running dssc query. "
+            "Cannot validate Product_name and MAT10_version."
+        )
+
+    matching_revisions = set()
+    any_name_match = False
+
+    with open(outlog_path, "r", encoding="utf-8") as f:
+        for i, line in enumerate(f):
+            line = line.strip()
+            if not line:
+                continue
+
+            # Skip header line if present
+            if i == 0 and line.upper().startswith("NAME,REVISION"):
+                continue
+
+            parts = line.split(",")
+            if len(parts) < 2:
+                continue  # malformed line, skip
+
+            name = parts[0].strip()
+            revision = parts[1].strip()
+
+            if name == product_name:
+                any_name_match = True
+                matching_revisions.add(revision)
+
+    # Check Product_name present
+    if not any_name_match:
+        raise ValueError(
+            f"Product_name '{product_name}' from '{TEMPLATE_FILENAME}' "
+            f"does not match any NAME entry in '{OUTLOG_FILENAME}'."
+        )
+
+    # Check MAT10_version matches one of the revisions
+    if mat10_version not in matching_revisions:
+        raise ValueError(
+            f"MAT10_version '{mat10_version}'"
+            "is not present in uptplus for Product_name "
+            f"'{product_name}'.\n"
+            f"Available versions for this product: "
+            + (", ".join(sorted(matching_revisions)) if matching_revisions else "<none>")
+        )
+
+
+ validate_product_and_version_with_outlog(product_name, mat10_version, outlog_path)
+        print("\nValidation successful: Product_name and MAT10_version match out.log.")
+        validate_product_and_version_with_outlog(product_name, be_or_mat10_2_version, outlog_path)
+        print("\nValidation successful: Product_name and BE version match out.log.")
+
+        if replication_check(product_name, mat10_version):
+            print(f"\nChecking in uptpluscache area: OK. Product '{product_name}' "
+                  f"version '{mat10_version}' is already present in uptpluscache")
+        else:
+            print(f"\nReplication check: NOT FOUND in '{UPT_BASE}' "
+                  f"for product '{product_name}', version '{mat10_version}'.")
+            replicate_to_upt(product_name, mat10_version)
+
+            # Optional: re-check after replication
+            if replication_check(product_name, mat10_version):
+                print("Replication done")
+            else:
+                print("WARNING: Replication in progress...\nPlease wait ")
+				
+				
+        if replication_check(product_name, be_or_mat10_2_version):
+            print(f"\nChecking in uptpluscache area: OK. Product '{product_name}' "
+                  f"version '{be_or_mat10_2_version}' is already present in uptpluscache")
+        else:
+            print(f"\nReplication check: NOT FOUND in '{UPT_BASE}' "
+                  f"for product '{product_name}', version '{be_or_mat10_2_version}'.")
+            replicate_to_upt(product_name, be_or_mat10_2_version)
+
+            # Optional: re-check after replication
+            if replication_check(product_name, be_or_mat10_2_version):
+                print("Replication done")
+            else:
+                print("WARNING: Replication in progress...\nPlease wait ")
