@@ -1,0 +1,190 @@
+wb = load_workbook(xlsx_path, data_only=True)
+
+sheet1 = wb["Sheet1"]
+sheet2 = wb["Sheet2"]
+
+sheet1 = wb.worksheets[0]
+sheet2 = wb.worksheets[1]
+
+
+matrix1 = []
+for row in sheet1.iter_rows(values_only=True):
+    matrix1.append([normalize(cell) for cell in row])
+
+matrix2 = []
+for row in sheet2.iter_rows(values_only=True):
+    matrix2.append([normalize(cell) for cell in row])
+
+return matrix1, matrix2
+
+
+
+matrix1, matrix2 = read_sheet_as_matrix(xlsx_path)
+
+table1_rows = parse_table("Table 1", matrix1)
+table2_rows = parse_table("Table 2", matrix1)
+table4_rows = parse_table("Table 4", matrix1)
+
+bidir_tx = parse_bidir_block(matrix2, "Bidir_TX")
+bidir_rx = parse_bidir_block(matrix2, "Bidir_RX")
+
+
+table1_map = {}
+
+for row in table1_rows:
+
+    key = row.get("Supply Name","").strip()
+
+    table1_map[key] = row.get("Map_Voltage","").strip()
+
+
+map_voltage = table1_map.get(sup_key,"")
+
+out.append(
+    f"\t\t\t\t\t\t(:map-voltage ({map_voltage}))\n"
+)
+
+
+def parse_bidir_block(matrix, block_name):
+    """
+    Parse a block like
+
+    Bidir_TX
+    Begin
+    :delay-threshold((IO_cmos))
+    :slope-threshold((IO_cmos))
+    cload((IO_custom1))
+    End
+    """
+
+    start = None
+    begin = None
+    end = None
+
+    # Find block name
+    for i, row in enumerate(matrix):
+        row_text = " ".join(cell for cell in row if cell)
+
+        if row_text.strip() == block_name:
+            start = i
+            break
+
+    if start is None:
+        return {}
+
+    # Find Begin after block name
+    for i in range(start + 1, len(matrix)):
+        row_text = " ".join(cell for cell in matrix[i] if cell)
+
+        if row_text.strip() == "Begin":
+            begin = i
+            break
+
+    if begin is None:
+        return {}
+
+    # Find End
+    for i in range(begin + 1, len(matrix)):
+        row_text = " ".join(cell for cell in matrix[i] if cell)
+
+        if row_text.strip() == "End":
+            end = i
+            break
+
+    if end is None:
+        return {}
+
+    block_text = "\n".join(
+        " ".join(cell for cell in row if cell)
+        for row in matrix[begin + 1:end]
+    )
+
+    result = {}
+
+    result["delay_threshold"] = extract_value(block_text, "delay-threshold")
+    result["slope_threshold"] = extract_value(block_text, "slope-threshold")
+
+    if block_name == "Bidir_TX":
+        result["cload"] = extract_value(block_text, "cload")
+
+    if block_name == "Bidir_RX":
+        result["slope"] = extract_value(block_text, "slope")
+
+    return result
+
+
+
+
+
+def extract_value(text, key):
+
+    # Match both
+    # :delay-threshold((IO_cmos))
+    # cload((IO_custom1))
+
+    pattern = rf":?{re.escape(key)}\(\((.*?)\)\)"
+
+    m = re.search(pattern, text)
+
+    if m:
+        return f"(( {m.group(1).strip()} ))".replace("((", "((").replace("))", "))")
+
+    return ""
+
+
+
+
+def extract_value(text, key):
+
+    pattern = rf":?{re.escape(key)}\(\((.*?)\)\)"
+
+    m = re.search(pattern, text)
+
+    if m:
+        return "((" + m.group(1).strip() + "))"
+
+    return ""
+
+
+
+
+out.append(
+    f"\t\t\t\t\t\t(:delay-threshold {delay})\n"
+)
+
+out.append(
+    f"\t\t\t\t\t\t(:slope-threshold {slope})\n"
+)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
