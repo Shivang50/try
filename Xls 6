@@ -1,0 +1,491 @@
+
+def extract_supply(op_name):
+    """
+    Extract SUP1, SUP2, SUP3... from operation name.
+
+    Example:
+        Bidir_TX_SUP1_R1 -> SUP1
+        Bidir_RX_SUP3 -> SUP3
+        leak_SUP2 -> SUP2
+    """
+
+    m = re.search(r"(SUP\d+)", op_name)
+
+    if m:
+        return m.group(1)
+
+    return ""
+
+
+def write_bidir_tx(
+        out,
+        op_name,
+        map_voltage,
+        stuck_to,
+        keep_stuck,
+        forbidden,
+        pin_voltage,
+        electrical,
+        include_file,
+        remove_name,
+        bidir):
+
+    out.append(
+        f"\t\t\t\t\t({op_name} (delay-only function slope intenergy) (\n"
+    )
+
+    out.append(
+        f"\t\t\t\t\t\t(:stuck-to ({stuck_to}))\n"
+    )
+
+    out.append(
+        f"\t\t\t\t\t\t(:keep-stuck-pins-in-cond ({keep_stuck}))\n"
+    )
+
+    out.append(
+        f"\t\t\t\t\t\t(:forbidden ({forbidden}))\n"
+    )
+
+    out.append(
+        f"\t\t\t\t\t\t(:map-voltage ({map_voltage}))\n"
+    )
+
+    out.append(
+        f"\t\t\t\t\t\t(:cload {bidir.get('cload','')})\n"
+    )
+
+    out.append(
+        f"\t\t\t\t\t\t(:slope-threshold {bidir.get('slope_threshold','')})\n"
+    )
+
+    out.append(
+        f"\t\t\t\t\t\t(:delay-threshold {bidir.get('delay_threshold','')})\n"
+    )
+
+    out.append(
+        f"\t\t\t\t\t\t(:pin-voltage ({pin_voltage}))\n"
+    )
+
+    out.append(
+        f"\t\t\t\t\t\t(:electrical ({electrical}))\n"
+    )
+
+    out.append(
+        f'\t\t\t\t\t\t(:include ("{include_file}"))\n'
+    )
+
+    if remove_name:
+        out.append(
+            f"\t\t\t\t\t\t(:remove-name ({remove_name}))\n"
+        )
+
+    out.append(
+        "\t\t\t\t\t))\n"
+    )
+
+
+def write_bidir_rx(
+        out,
+        op_name,
+        map_voltage,
+        stuck_to,
+        keep_stuck,
+        forbidden,
+        electrical,
+        include_file,
+        remove_name,
+        bidir):
+
+    out.append(
+        f"\t\t\t\t\t({op_name} (delay-only function slope intenergy) (\n"
+    )
+
+    out.append(
+        f"\t\t\t\t\t\t(:stuck-to ({stuck_to}))\n"
+    )
+
+    out.append(
+        f"\t\t\t\t\t\t(:keep-stuck-pins-in-cond ({keep_stuck}))\n"
+    )
+
+    out.append(
+        f"\t\t\t\t\t\t(:forbidden ({forbidden}))\n"
+    )
+
+    out.append(
+        f"\t\t\t\t\t\t(:map-voltage ({map_voltage}))\n"
+    )
+
+    out.append(
+        f"\t\t\t\t\t\t(:slope {bidir.get('slope','')})\n"
+    )
+
+    out.append(
+        f"\t\t\t\t\t\t(:slope-threshold {bidir.get('slope_threshold','')})\n"
+    )
+
+    out.append(
+        f"\t\t\t\t\t\t(:delay-threshold {bidir.get('delay_threshold','')})\n"
+    )
+
+    out.append(
+        f"\t\t\t\t\t\t(:electrical ({electrical}))\n"
+    )
+
+    out.append(
+        f'\t\t\t\t\t\t(:include ("{include_file}"))\n'
+    )
+
+    if remove_name:
+        out.append(
+            f"\t\t\t\t\t\t(:remove-name ({remove_name}))\n"
+        )
+
+    out.append(
+        "\t\t\t\t\t))\n"
+    )
+
+
+def write_leak(
+        out,
+        op_name,
+        map_voltage,
+        stuck_to,
+        include_file,
+        remove_name):
+
+    out.append(
+        f"\t\t\t\t\t({op_name} (leakpower) (\n"
+    )
+
+    out.append(
+        f"\t\t\t\t\t\t(:map-voltage ({map_voltage}))\n"
+    )
+
+    out.append(
+        f"\t\t\t\t\t\t(:stuck-to ({stuck_to}))\n"
+    )
+
+    out.append(
+        f'\t\t\t\t\t\t(:include ("{include_file}"))\n'
+    )
+
+    if remove_name:
+        out.append(
+            f"\t\t\t\t\t\t(:remove-name ({remove_name}))\n"
+        )
+
+    out.append(
+        "\t\t\t\t\t))\n"
+    )
+
+
+def write_only_cap(
+        out,
+        op_name,
+        map_voltage,
+        stuck_to,
+        include_file,
+        remove_name):
+
+    out.append(
+        f'\t\t\t\t\t({op_name} ".*" (capa) (\n'
+    )
+
+    out.append(
+        f"\t\t\t\t\t\t(:map-voltage ({map_voltage}))\n"
+    )
+
+    out.append(
+        f"\t\t\t\t\t\t(:stuck-to ({stuck_to}))\n"
+    )
+
+    out.append(
+        f'\t\t\t\t\t\t(:include ("{include_file}"))\n'
+    )
+
+    if remove_name:
+        out.append(
+            f"\t\t\t\t\t\t(:remove-name ({remove_name}))\n"
+        )
+
+    out.append(
+        "\t\t\t\t\t))\n"
+    )
+
+def write_bidir_tx1(
+        out,
+        op_name,
+        map_voltage,
+        stuck_to,
+        keep_stuck,
+        forbidden,
+        pin_voltage,
+        electrical,
+        include_file,
+        remove_name,
+        bidir):
+
+    write_bidir_tx(
+        out,
+        op_name,
+        map_voltage,
+        stuck_to,
+        keep_stuck,
+        forbidden,
+        pin_voltage,
+        electrical,
+        include_file,
+        remove_name,
+        bidir
+    )
+
+
+def generate_operation_model_block(
+        table4_rows,
+        table1_map,
+        table2_map,
+        bidir_tx,
+        bidir_rx):
+
+    out = []
+
+    out.append("\t:operation-model\t\t'(\n")
+
+    for row in table4_rows:
+
+        mode = row.get("Mode","").strip()
+
+        if not mode:
+            continue
+
+        map_voltage = row.get("Map_voltage","").strip()
+        resistance = row.get("Resistance","").strip()
+
+        include_file = row.get("Include File","").strip()
+
+        stuck_to_raw = row.get("Stuck-to","").strip()
+
+        keep_stuck = row.get(
+            "Keep-stuck-pins-in-cond",
+            ""
+        ).strip()
+
+        forbidden = row.get(
+            "Forbidden",
+            ""
+        ).strip()
+
+        electrical = row.get(
+            "Electrical",
+            ""
+        ).strip()
+
+        pin_voltage = row.get(
+            "Pin-Voltage",
+            ""
+        ).strip()
+
+        remove_name = row.get(
+            "Remove_name",
+            ""
+        ).strip()
+
+        resolved_stuck = resolve_stuck_to(
+            stuck_to_raw,
+            table2_map
+        )
+
+        operation_names = build_operation_names(
+            mode,
+            map_voltage,
+            resistance
+        )
+
+        for op_name in operation_names:
+
+            ###################################################
+            # Resolve SUP1 SUP2 SUP3 SUP4
+            ###################################################
+
+            sup = extract_supply(op_name)
+
+            resolved_voltage = table1_map.get(
+                sup,
+                ""
+            )
+
+            ###################################################
+            # BIDIR TX
+            ###################################################
+
+            if mode == "Bidir_TX":
+
+                write_bidir_tx(
+
+                    out,
+
+                    op_name,
+
+                    resolved_voltage,
+
+                    resolved_stuck,
+
+                    keep_stuck,
+
+                    forbidden,
+
+                    pin_voltage,
+
+                    electrical,
+
+                    include_file,
+
+                    remove_name,
+
+                    bidir_tx
+
+                )
+
+            ###################################################
+            # BIDIR TX1
+            ###################################################
+
+            elif mode == "Bidir_TX1":
+
+                write_bidir_tx1(
+
+                    out,
+
+                    op_name,
+
+                    resolved_voltage,
+
+                    resolved_stuck,
+
+                    keep_stuck,
+
+                    forbidden,
+
+                    pin_voltage,
+
+                    electrical,
+
+                    include_file,
+
+                    remove_name,
+
+                    bidir_tx
+
+                )
+
+
+
+
+
+
+
+            ###################################################
+            # BIDIR RX
+            ###################################################
+
+            elif mode == "Bidir_RX":
+
+                write_bidir_rx(
+
+                    out,
+
+                    op_name,
+
+                    resolved_voltage,
+
+                    resolved_stuck,
+
+                    keep_stuck,
+
+                    forbidden,
+
+                    electrical,
+
+                    include_file,
+
+                    remove_name,
+
+                    bidir_rx
+
+                )
+
+            ###################################################
+            # LEAK
+            ###################################################
+
+            elif mode.lower() == "leak":
+
+                write_leak(
+
+                    out,
+
+                    op_name,
+
+                    resolved_voltage,
+
+                    resolved_stuck,
+
+                    include_file,
+
+                    remove_name
+
+                )
+
+            ###################################################
+            # ONLY CAP
+            ###################################################
+
+            elif mode.lower() in ("only_cap", "onlycap"):
+
+                write_only_cap(
+
+                    out,
+
+                    op_name,
+
+                    resolved_voltage,
+
+                    resolved_stuck,
+
+                    include_file,
+
+                    remove_name
+
+                )
+
+            ###################################################
+            # Unknown Mode
+            ###################################################
+
+            else:
+
+                print(f"Skipping unknown mode : {mode}")
+
+    out.append("\t)\n")
+
+    return out
+
+
+
+def resolve_stuck_to(stuck_to_text, table2_map):
+
+    if not stuck_to_text:
+        return ""
+
+    resolved = []
+
+    for key in split_values(stuck_to_text):
+
+        key = key.strip()
+
+        if key in table2_map:
+            resolved.append(table2_map[key])
+
+    return "".join(resolved)
+
