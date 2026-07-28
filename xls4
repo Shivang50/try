@@ -1,0 +1,67 @@
+do these following tasks:
+1. Read columns- Mode, Map_voltage, Resistance of Table 4 and then you have to make cells (as shown in the pictures, we were previously focusing on Bidir_TX, Bidir_RX of Mode, but now also take care the other values of Mode column)
+By reading these columns you have to make all the combinations to get all the cells.
+Fir example:
+Bidir_TX_SUP1_R1, Bidir_TX_SUP1_R2, Bidir_TX_SUP1_R3, Bidir_TX_SUP2_R1, Bidir_TX_SUP2_R2, Bidir_TX_SUP2_R3, Bidir_TX_SUP3_R1, Bidir_TX_SUP3_R2, Bidir_TX_SUP3_R3, Bidir_TX_SUP4_R1, Bidir_TX_SUP4_R2, Bidir_TX_SUP4_R3,
+Bidir_RX_SUP1, Bidir_RX_SUP2, Bidir_RX_SUP3, Bidir_RX_SUP4 (Bidir_RX has resistance empty in this case, so we do not include resistance in making cominations)
+leak_SUP1, leak_SUP2, leak_SUP3, leak_SUP4,
+onlycap_SUP1,
+Bidir_TX1_SUP1_R1, Bidir_TX1_SUP1_R2, Bidir_TX1_SUP2_R1, Bidir_TX1_SUP2_R2.
+
+Follow these structures. For:
+a) Bidir_TX
+1					 (Bidir_TX_SUP1_R1 (delay-only function slope intenergy) (
+2						 (:stuck-to )
+3						 (:keep-stuck-pins-in-cond )
+4						 (:forbidden )
+5						 (:map-voltage )
+6						 (:cload )
+7						 (:slope-threshold )
+8						 (:delay-threshold )
+9						 (:pin-voltage )
+10						 (:electrical )
+11						 (:include ("$Path"))
+12 						 (:remove-name )
+13					))
+In line number 1- <Bidir_TX_SUP1_R1> should come from the cell combinations that we formed. Same will be done for all types of cells.
+
+b) Bidir_RX
+					 (Bidir_RX_SUP1 (delay-only function slope intenergy) (
+						 (:stuck-to )
+						 (:keep-stuck-pins-in-cond )
+						 (:forbidden )
+						 (:map-voltage )
+						 (:slope )
+						 (:slope-threshold )
+						 (:delay-threshold )
+						 (:electrical )
+						 (:include ("$Path"))
+						 (:remove-name )
+					 ))
+
+c) leak
+					 (leak_SUP1 (leakpower) (
+						 (:map-voltage )
+						 (:stuck-to )
+						 (:include ("$Path"))
+                                                 (:remove-name )
+					))
+
+
+d) onlycap
+					(onlycap_SUP1 ".*" (capa) (
+						 (:map-voltage )
+						 (:stuck-to )
+						 (:include ("$Path"))
+						 (:remove-name )
+					))
+
+e) For Bidir_TX1 keep the same formatting as Bidir_TX for now.
+
+
+- for now we can leave these attributes in the cells as it is, we will work on it later: forbidden, cload, slope, electrical, remove-name. Currently we are focusing on getting the correct structure for each cell type.
+
+- remove-name is an optional attribute, if the value of remove-name is present for the cell then keep this attribute in the output otherwise don't keep.
+For example: in this case, remove-name will be kept for cells: leak, onlycap. For cells Bidir_TX, Bidir_RX remove-name attribute will not be present.
+You can pick the value of remove-name from Table 4 column and then print this value as it is in the respectice cell.
+
