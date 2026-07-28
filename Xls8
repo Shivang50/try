@@ -1,0 +1,6 @@
+stuck_to_raw = row.get("Stuck-to", "").strip()
+
+resolved_stuck = resolve_stuck_to(
+    stuck_to_raw,
+    table2_map
+)
