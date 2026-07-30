@@ -1,0 +1,100 @@
+preserved = list(scm_lines)
+
+    # Drop any trailing blank lines so spacing is predictable
+    while preserved and not preserved[-1].strip():
+        preserved.pop()
+
+    # Guarantee the last content line is terminated
+    if preserved and not preserved[-1].endswith("\n"):
+        preserved[-1] += "\n"
+
+    # Exactly one blank line before :operation-model
+    preserved.append("\n")
+
+
+
+
+MODE_TX_RE = re.compile(r"bidir_tx\d*")
+MODE_RX_RE = re.compile(r"bidir_rx\d*")
+
+def classify_mode(mode):
+    m = mode.strip().lower()
+    if MODE_TX_RE.fullmatch(m):
+        return "TX"
+    if MODE_RX_RE.fullmatch(m):
+        return "RX"
+    if m == "leak":
+        return "LEAK"
+    if m in ("only_cap", "onlycap"):
+        return "CAP"
+    return None
+
+def write_leak(out, op_name, map_voltage, stuck_to, keep_stuck,
+               forbidden, electrical, include_file, remove_name):
+
+    out.append(f"\t\t\t\t\t({op_name} (leakpower) (\n")
+    out.append(f"\t\t\t\t\t\t(:stuck-to ({stuck_to}))\n")
+    out.append(f"\t\t\t\t\t\t(:keep-stuck-pins-in-cond ({keep_stuck}))\n")
+    out.append(f"\t\t\t\t\t\t(:forbidden ({forbidden}))\n")
+    out.append(f"\t\t\t\t\t\t(:map-voltage ({map_voltage}))\n")
+    out.append(f"\t\t\t\t\t\t(:electrical ({electrical}))\n")
+    out.append(f'\t\t\t\t\t\t(:include ("{include_file}"))\n')
+    if remove_name:
+        out.append(f"\t\t\t\t\t\t(:remove-name ({remove_name}))\n")
+    out.append("\t\t\t\t\t))\n")
+
+
+def write_only_cap(out, op_name, map_voltage, stuck_to, keep_stuck,
+                   forbidden, electrical, include_file, remove_name):
+
+    out.append(f'\t\t\t\t\t({op_name} ".*" (capa) (\n')
+    out.append(f"\t\t\t\t\t\t(:stuck-to ({stuck_to}))\n")
+    out.append(f"\t\t\t\t\t\t(:keep-stuck-pins-in-cond ({keep_stuck}))\n")
+    out.append(f"\t\t\t\t\t\t(:forbidden ({forbidden}))\n")
+    out.append(f"\t\t\t\t\t\t(:map-voltage ({map_voltage}))\n")
+    out.append(f"\t\t\t\t\t\t(:electrical ({electrical}))\n")
+    out.append(f'\t\t\t\t\t\t(:include ("{include_file}"))\n')
+    if remove_name:
+        out.append(f"\t\t\t\t\t\t(:remove-name ({remove_name}))\n")
+    out.append("\t\t\t\t\t))\n")
+
+
+
+family = classify_mode(mode)
+
+if family == "TX":
+    write_bidir_tx(out, op_name, resolved_voltage, resolved_stuck,
+                   keep_stuck, forbidden, pin_voltage, electrical,
+                   include_file, remove_name,
+                   bidir_blocks.get(mode, bidir_tx))
+
+elif family == "RX":
+    write_bidir_rx(out, op_name, resolved_voltage, resolved_stuck,
+                   keep_stuck, forbidden, electrical,
+                   include_file, remove_name,
+                   bidir_blocks.get(mode, bidir_rx))
+
+elif family == "LEAK":
+    write_leak(out, op_name, resolved_voltage, resolved_stuck,
+               keep_stuck, forbidden, electrical,
+               include_file, remove_name)
+
+elif family == "CAP":
+    write_only_cap(out, op_name, resolved_voltage, resolved_stuck,
+                   keep_stuck, forbidden, electrical,
+                   include_file, remove_name)
+
+else:
+    print(f"Skipping unknown mode : {mode}")
+
+
+
+bidir_blocks = {}
+for row in table4_rows:
+    m = row.get("Mode", "").strip()
+    if not m:
+        continue
+    blk = parse_bidir_block(matrix2, m)
+    if blk:
+        bidir_blocks[m] = blk
+
