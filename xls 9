@@ -1,0 +1,930 @@
+import re
+import sys
+from pathlib import Path
+from openpyxl import load_workbook
+
+def read_xlsx_table(xlsx_path):
+    wb = load_workbook(xlsx_path, data_only=True)
+    ws = wb.active
+
+    rows = list(ws.iter_rows(values_only=True))
+    rows = [r for r in rows if any(cell is not None and str(cell).strip() for cell in r)]
+
+    if not rows:
+        raise ValueError("XLSX sheet is empty.")
+
+    headers = ["" if x is None else str(x).strip() for x in rows[0]]
+    data = []
+
+    for r in rows[1:]:
+        row_dict = {}
+        for i, h in enumerate(headers):
+            row_dict[h] = "" if i >= len(r) or r[i] is None else str(r[i]).strip()
+        data.append(row_dict)
+
+    return data
+
+def find_matching_row(rows, mode_name):
+    """Find row by Mode field."""
+    for row in rows:
+        if row.get("Mode", "").strip() == mode_name:
+            return row
+    return None
+
+
+def split_values(value):
+    if value is None:
+        return []
+    return [v.strip() for v in str(value).split(":") if v.strip()]
+
+
+def build_table2_dict(table2_rows):
+    d = {}
+    for row in table2_rows:
+        key = row.get("Stuck-to-Common", "").strip()
+        val = row.get("Stuck Pins", "").strip()
+        if key:
+            d[key] = val
+    return d
+
+#def resolve_stuck_to(stuck_to_text, table2_map):
+#    result = []
+    
+#    for key in split_values(stuck_to_text):
+ #       key = key.strip()
+ #       
+  #      if key in table2_map:
+  #          result.append(table2_map[key])
+  #      else:
+  #          result.append(key)
+
+  #  return "".join(result)
+  
+
+def resolve_stuck_to(stuck_to_text, table2_map):
+
+    if not stuck_to_text:
+        return ""
+
+    resolved = []
+
+    for key in split_values(stuck_to_text):
+
+        key = key.strip()
+
+        if key in table2_map:
+            resolved.append(table2_map[key])
+
+    return "".join(resolved)
+
+def build_operation_names(mode, map_voltage, resistance):
+    map_list = split_values(map_voltage)
+    res_list = split_values(resistance)
+
+    names = []
+
+    if res_list:
+        for mv in map_list:
+            for res in res_list:
+                names.append(f"{mode}_{mv}_{res}")
+    else:
+        for mv in map_list:
+            names.append(f"{mode}_{mv}")
+
+    return names
+
+
+def extract_supply(op_name):
+    """
+    Extract SUP1, SUP2, SUP3... from operation name.
+
+    Example:
+        Bidir_TX_SUP1_R1 -> SUP1
+        Bidir_RX_SUP3 -> SUP3
+        leak_SUP2 -> SUP2
+    """
+
+    m = re.search(r"(SUP\d+)", op_name)
+
+    if m:
+        return m.group(1)
+
+    return ""
+
+
+def write_bidir_tx(
+        out,
+        op_name,
+        map_voltage,
+        stuck_to,
+        keep_stuck,
+        forbidden,
+        pin_voltage,
+        electrical,
+        include_file,
+        remove_name,
+        bidir):
+
+    out.append(
+        f"\t\t\t\t\t({op_name} (delay-only function slope intenergy) (\n"
+    )
+
+    out.append(
+        f"\t\t\t\t\t\t(:stuck-to ({stuck_to}))\n"
+    )
+
+    out.append(
+        f"\t\t\t\t\t\t(:keep-stuck-pins-in-cond ({keep_stuck}))\n"
+    )
+
+    out.append(
+        f"\t\t\t\t\t\t(:forbidden ({forbidden}))\n"
+    )
+
+    out.append(
+        f"\t\t\t\t\t\t(:map-voltage ({map_voltage}))\n"
+    )
+
+    out.append(
+        f"\t\t\t\t\t\t(:cload {bidir.get('cload','')})\n"
+    )
+
+    out.append(
+        f"\t\t\t\t\t\t(:slope-threshold {bidir.get('slope_threshold','')})\n"
+    )
+
+    out.append(
+        f"\t\t\t\t\t\t(:delay-threshold {bidir.get('delay_threshold','')})\n"
+    )
+
+    out.append(
+        f"\t\t\t\t\t\t(:pin-voltage ({pin_voltage}))\n"
+    )
+
+    out.append(
+        f"\t\t\t\t\t\t(:electrical ({electrical}))\n"
+    )
+
+    out.append(
+        f'\t\t\t\t\t\t(:include ("{include_file}"))\n'
+    )
+
+    if remove_name:
+        out.append(
+            f"\t\t\t\t\t\t(:remove-name ({remove_name}))\n"
+        )
+
+    out.append(
+        "\t\t\t\t\t))\n"
+    )
+
+
+def write_bidir_rx(
+        out,
+        op_name,
+        map_voltage,
+        stuck_to,
+        keep_stuck,
+        forbidden,
+        electrical,
+        include_file,
+        remove_name,
+        bidir):
+
+    out.append(
+        f"\t\t\t\t\t({op_name} (delay-only function slope intenergy) (\n"
+    )
+
+    out.append(
+        f"\t\t\t\t\t\t(:stuck-to ({stuck_to}))\n"
+    )
+
+    out.append(
+        f"\t\t\t\t\t\t(:keep-stuck-pins-in-cond ({keep_stuck}))\n"
+    )
+
+    out.append(
+        f"\t\t\t\t\t\t(:forbidden ({forbidden}))\n"
+    )
+
+    out.append(
+        f"\t\t\t\t\t\t(:map-voltage ({map_voltage}))\n"
+    )
+
+    out.append(
+        f"\t\t\t\t\t\t(:slope {bidir.get('slope','')})\n"
+    )
+
+    out.append(
+        f"\t\t\t\t\t\t(:slope-threshold {bidir.get('slope_threshold','')})\n"
+    )
+
+    out.append(
+        f"\t\t\t\t\t\t(:delay-threshold {bidir.get('delay_threshold','')})\n"
+    )
+
+    out.append(
+        f"\t\t\t\t\t\t(:electrical ({electrical}))\n"
+    )
+
+    out.append(
+        f'\t\t\t\t\t\t(:include ("{include_file}"))\n'
+    )
+
+    if remove_name:
+        out.append(
+            f"\t\t\t\t\t\t(:remove-name ({remove_name}))\n"
+        )
+
+    out.append(
+        "\t\t\t\t\t))\n"
+    )
+
+
+def write_leak(
+        out,
+        op_name,
+        map_voltage,
+        stuck_to,
+        include_file,
+        remove_name):
+
+    out.append(
+        f"\t\t\t\t\t({op_name} (leakpower) (\n"
+    )
+
+    out.append(
+        f"\t\t\t\t\t\t(:map-voltage ({map_voltage}))\n"
+    )
+
+    out.append(
+        f"\t\t\t\t\t\t(:stuck-to ({stuck_to}))\n"
+    )
+
+    out.append(
+        f'\t\t\t\t\t\t(:include ("{include_file}"))\n'
+    )
+
+    if remove_name:
+        out.append(
+            f"\t\t\t\t\t\t(:remove-name ({remove_name}))\n"
+        )
+
+    out.append(
+        "\t\t\t\t\t))\n"
+    )
+
+
+def write_only_cap(
+        out,
+        op_name,
+        map_voltage,
+        stuck_to,
+        include_file,
+        remove_name):
+
+    out.append(
+        f'\t\t\t\t\t({op_name} ".*" (capa) (\n'
+    )
+
+    out.append(
+        f"\t\t\t\t\t\t(:map-voltage ({map_voltage}))\n"
+    )
+
+    out.append(
+        f"\t\t\t\t\t\t(:stuck-to ({stuck_to}))\n"
+    )
+
+    out.append(
+        f'\t\t\t\t\t\t(:include ("{include_file}"))\n'
+    )
+
+    if remove_name:
+        out.append(
+            f"\t\t\t\t\t\t(:remove-name ({remove_name}))\n"
+        )
+
+    out.append(
+        "\t\t\t\t\t))\n"
+    )
+
+def write_bidir_tx1(
+        out,
+        op_name,
+        map_voltage,
+        stuck_to,
+        keep_stuck,
+        forbidden,
+        pin_voltage,
+        electrical,
+        include_file,
+        remove_name,
+        bidir):
+
+    write_bidir_tx(
+        out,
+        op_name,
+        map_voltage,
+        stuck_to,
+        keep_stuck,
+        forbidden,
+        pin_voltage,
+        electrical,
+        include_file,
+        remove_name,
+        bidir
+    )
+
+
+def generate_operation_model_block(
+        table4_rows,
+        table1_map,
+        table2_map,
+        bidir_tx,
+        bidir_rx):
+
+    out = []
+
+    out.append("\t:operation-model\t\t'(\n")
+
+    for row in table4_rows:
+
+        mode = row.get("Mode","").strip()
+
+        if not mode:
+            continue
+
+        map_voltage = row.get("Map_voltage","").strip()
+        resistance = row.get("Resistance","").strip()
+
+        include_file = "$Path"
+
+        stuck_to_raw = row.get("Stuck-to","").strip()
+        
+        resolved_stuck = resolve_stuck_to(stuck_to_raw, table2_map)
+
+        keep_stuck = row.get(
+            "Keep-stuck-pins-in-cond",
+            ""
+        ).strip()
+
+        forbidden = ()
+
+        electrical = ()
+
+        pin_voltage = ()
+
+        remove_name = row.get(
+            "Remove_name",
+            ""
+        ).strip()
+
+        resolved_stuck = resolve_stuck_to(
+            stuck_to_raw,
+            table2_map
+        )
+
+        operation_names = build_operation_names(
+            mode,
+            map_voltage,
+            resistance
+        )
+
+        for op_name in operation_names:
+
+            ###################################################
+            # Resolve SUP1 SUP2 SUP3 SUP4
+            ###################################################
+
+            sup = extract_supply(op_name).upper()
+
+            resolved_voltage = table1_map.get(sup,"")
+            print("OP_NAME =", op_name, "SUP =", sup, "RESOLVED =", resolved_voltage)
+
+            ###################################################
+            # BIDIR TX
+            ###################################################
+
+            if mode == "Bidir_TX":
+
+                write_bidir_tx(
+
+                    out,
+
+                    op_name,
+
+                    resolved_voltage,
+
+                    resolved_stuck,
+
+                    keep_stuck,
+
+                    forbidden,
+
+                    pin_voltage,
+
+                    electrical,
+
+                    include_file,
+
+                    remove_name,
+
+                    bidir_tx
+
+                )
+
+            ###################################################
+            # BIDIR TX1
+            ###################################################
+
+            elif mode == "Bidir_TX1":
+
+                write_bidir_tx1(
+
+                    out,
+
+                    op_name,
+
+                    resolved_voltage,
+
+                    resolved_stuck,
+
+                    keep_stuck,
+
+                    forbidden,
+
+                    pin_voltage,
+
+                    electrical,
+
+                    include_file,
+
+                    remove_name,
+
+                    bidir_tx
+
+                )
+
+
+
+
+
+
+
+            ###################################################
+            # BIDIR RX
+            ###################################################
+
+            elif mode == "Bidir_RX":
+
+                write_bidir_rx(
+
+                    out,
+
+                    op_name,
+
+                    resolved_voltage,
+
+                    resolved_stuck,
+
+                    keep_stuck,
+
+                    forbidden,
+
+                    electrical,
+
+                    include_file,
+
+                    remove_name,
+
+                    bidir_rx
+
+                )
+
+            ###################################################
+            # LEAK
+            ###################################################
+
+            elif mode.lower() == "leak":
+
+                write_leak(
+
+                    out,
+
+                    op_name,
+
+                    resolved_voltage,
+
+                    resolved_stuck,
+
+                    include_file,
+
+                    remove_name
+
+                )
+
+            ###################################################
+            # ONLY CAP
+            ###################################################
+
+            elif mode.lower() in ("only_cap", "onlycap"):
+
+                write_only_cap(
+
+                    out,
+
+                    op_name,
+
+                    resolved_voltage,
+
+                    resolved_stuck,
+
+                    include_file,
+
+                    remove_name
+
+                )
+
+            ###################################################
+            # Unknown Mode
+            ###################################################
+
+            else:
+
+                print(f"Skipping unknown mode : {mode}")
+
+    out.append("\t)\n")
+
+    return out
+
+
+
+def parse_table(table_name, matrix):
+    """
+    Extract rows from a table section in the worksheet.
+
+    Expected sheet format:
+      <Table name> begin
+      header row
+      data rows
+      <Table name> end
+    """
+    begin_marker = f"{table_name} begin"
+    end_marker = f"{table_name} end"
+
+    begin_idx = None
+    end_idx = None
+
+    for i, row in enumerate(matrix):
+        row_text = " ".join(cell for cell in row if cell)
+        if begin_marker in row_text:
+            begin_idx = i
+        elif begin_idx is not None and end_marker in row_text:
+            end_idx = i
+            break
+
+    if begin_idx is None or end_idx is None:
+        return []
+
+    section_rows = matrix[begin_idx + 1:end_idx]
+
+    # Remove fully empty rows
+    section_rows = [r for r in section_rows if any(cell.strip() for cell in r)]
+
+    if not section_rows:
+        return []
+
+    # First non-empty row is header
+    headers = [cell.strip() for cell in section_rows[0]]
+    data_rows = []
+
+    for r in section_rows[1:]:
+        row_dict = {}
+        for idx, header in enumerate(headers):
+            if header:
+                row_dict[header] = r[idx].strip() if idx < len(r) else ""
+        data_rows.append(row_dict)
+
+    return data_rows
+
+def build_table1_map_from_sheet(ws):
+    table1_map = {}
+
+    for row in range(4, 8):  # adjust if needed
+        supply = ws[f"B{row}"].value
+        map_voltage = ws[f"D{row}"].value
+
+        if supply:
+            table1_map[str(supply).strip().upper()] = "" if map_voltage is None else str(map_voltage).strip()
+
+    return table1_map
+
+
+def update_scm_file(scm_path, xlsx_path, output_path="result.scm"):
+    scm_path = Path(scm_path)
+    xlsx_path = Path(xlsx_path)
+    output_path = Path(output_path)
+
+    # 1) Read workbook and parse sections
+    wb = load_workbook(xlsx_path, data_only=True)
+    sheet1 = wb.worksheets[0]
+    sheet2 = wb.worksheets[1]
+
+    matrix1, matrix2 = read_sheet_as_matrix(xlsx_path)
+
+    table2_rows = parse_table("Table 2", matrix1)
+    table4_rows = parse_table("Table 4", matrix1)
+
+    bidir_tx = parse_bidir_block(matrix2, "Bidir_TX")
+    bidir_rx = parse_bidir_block(matrix2, "Bidir_RX")
+
+    # Build Table 1 mapping directly from Sheet1 cells
+    table1_map = build_table1_map_from_sheet(sheet1)
+
+    # Build Table 2 mapping
+    table2_map = build_table2_dict(table2_rows)
+
+    # Generate operation-model block
+    print("TABLE1 MAP:", table1_map)
+    print("TABLE2 ROWS:", table2_rows)
+    print("TABLE4 ROWS:", table4_rows)
+    print("TABLE2 MAP:", table2_map)
+    print("BIDIR_TX:", bidir_tx)
+    print("BIDIR_RX:", bidir_rx)
+
+    op_block = generate_operation_model_block(
+        table4_rows=table4_rows,
+        table1_map=table1_map,
+        table2_map=table2_map,
+        bidir_tx=bidir_tx,
+        bidir_rx=bidir_rx
+    )
+
+    # Read scm and keep content up to :direct-pins-dependency
+    with scm_path.open("r", encoding="utf-8") as f:
+        scm_lines = f.readlines()
+
+    direct_idx = None
+    for i, line in enumerate(scm_lines):
+        if ":direct-pins-dependency" in line:
+            direct_idx = i
+            break
+
+    if direct_idx is None:
+        raise ValueError("Could not find :direct-pins-dependency in the .scm file.")
+
+    preserved = scm_lines[: direct_idx + 1]
+    preserved.append("\n")
+
+    # Write output file
+    with output_path.open("w", encoding="utf-8") as f:
+        f.writelines(preserved)
+        f.writelines(op_block)
+
+    return str(output_path)
+
+
+def normalize(value):
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def read_sheet_as_matrix(xlsx_path):
+    wb = load_workbook(xlsx_path, data_only=True)
+    sheet1 = wb.worksheets[0]
+    sheet2 = wb.worksheets[1]
+    
+    matrix1 = []
+    for row in sheet1.iter_rows(values_only=True):
+        matrix1.append([normalize(cell) for cell in row])
+
+    matrix2 = []
+    for row in sheet2.iter_rows(values_only=True):
+        matrix2.append([normalize(cell) for cell in row])
+
+    return matrix1, matrix2
+
+
+def find_rows_with_text(matrix, text):
+    """
+    Returns list of row indexes where any cell contains the given text.
+    """
+    matches = []
+    for i, row in enumerate(matrix):
+        if any(text in cell for cell in row if cell):
+            matches.append(i)
+    return matches
+
+
+def extract_section_rows(matrix, begin_marker, end_marker):
+    """
+    Extract rows between begin_marker and end_marker.
+    """
+    begin_idx = None
+    end_idx = None
+
+    for i, row in enumerate(matrix):
+        row_text = " ".join(cell for cell in row if cell)
+        if begin_marker in row_text:
+            begin_idx = i
+        elif begin_idx is not None and end_marker in row_text:
+            end_idx = i
+            break
+
+    if begin_idx is None or end_idx is None:
+        return []
+
+    return matrix[begin_idx + 1:end_idx]
+
+
+def parse_table_rows(section_rows):
+    """
+    Convert a section into [header, data rows].
+    Ignores empty rows.
+    """
+    non_empty = [r for r in section_rows if any(c.strip() for c in r)]
+    if not non_empty:
+        return [], []
+
+    headers = non_empty[0]
+    data_rows = []
+
+    for r in non_empty[1:]:
+        row_dict = {}
+        for idx, h in enumerate(headers):
+            if h:
+                row_dict[h] = r[idx] if idx < len(r) else ""
+        data_rows.append(row_dict)
+
+    return headers, data_rows
+
+
+def collect_table_data(matrix, table_name):
+    begin_marker = f"{table_name} begin"
+    end_marker = f"{table_name} end"
+
+    section_rows = extract_section_rows(matrix, begin_marker, end_marker)
+    headers, rows = parse_table_rows(section_rows)
+
+    return {
+        "headers": headers,
+        "rows": rows,
+    }
+
+
+
+def parse_bidir_block(matrix, block_name):
+    """
+    Parse a block like
+
+    Bidir_TX
+    Begin
+    :delay-threshold((IO_cmos))
+    :slope-threshold((IO_cmos))
+    cload((IO_custom1))
+    End
+    """
+
+    start = None
+    begin = None
+    end = None
+
+    # Find block name
+    for i, row in enumerate(matrix):
+        row_text = " ".join(cell for cell in row if cell)
+
+        if row_text.strip() == block_name:
+            start = i
+            break
+
+    if start is None:
+        return {}
+
+    # Find Begin after block name
+    for i in range(start + 1, len(matrix)):
+        row_text = " ".join(cell for cell in matrix[i] if cell)
+
+        if row_text.strip() == "Begin":
+            begin = i
+            break
+
+    if begin is None:
+        return {}
+
+    # Find End
+    for i in range(begin + 1, len(matrix)):
+        row_text = " ".join(cell for cell in matrix[i] if cell)
+
+        if row_text.strip() == "End":
+            end = i
+            break
+
+    if end is None:
+        return {}
+
+    block_text = "\n".join(
+        " ".join(cell for cell in row if cell)
+        for row in matrix[begin + 1:end]
+    )
+
+    result = {}
+
+    result["delay_threshold"] = extract_value(block_text, "delay-threshold")
+    result["slope_threshold"] = extract_value(block_text, "slope-threshold")
+
+    if block_name == "Bidir_TX":
+        result["cload"] = extract_value(block_text, "cload")
+
+    if block_name == "Bidir_RX":
+        result["slope"] = extract_value(block_text, "slope")
+
+    return result
+
+
+def extract_value(text, key):
+
+    pattern = rf":?{re.escape(key)}\(\((.*?)\)\)"
+
+    m = re.search(pattern, text)
+
+    if m:
+        return "((" + m.group(1).strip() + "))"
+
+    return ""
+
+
+
+
+def split_values(value):
+    if value is None:
+        return []
+    return [v.strip() for v in str(value).split(":") if v.strip()]
+    
+
+
+
+
+def parse_table4(matrix):
+    begin_idx = None
+    end_idx = None
+
+    for i, row in enumerate(matrix):
+        row_text = " ".join(cell for cell in row if cell)
+        if "Table 4 begin" in row_text:
+            begin_idx = i
+        elif begin_idx is not None and "Table 4 end" in row_text:
+            end_idx = i
+            break
+
+    if begin_idx is None or end_idx is None:
+        return []
+
+    section = matrix[begin_idx + 1:end_idx]
+    section = [r for r in section if any(c.strip() for c in r)]
+
+    if not section:
+        return []
+
+    headers = section[0]
+    rows = []
+
+    for r in section[1:]:
+        row_dict = {}
+        for idx, h in enumerate(headers):
+            if h:
+                row_dict[h] = r[idx] if idx < len(r) else ""
+        rows.append(row_dict)
+
+    return rows
+
+
+
+def main():
+    scm_path = sys.argv[1]
+    xlsx_path = sys.argv[2]
+    result = update_scm_file(scm_path, xlsx_path, output_path="result.scm")
+    print(f"Created output file: {result}")
+
+
+if __name__ == "__main__":
+
+    if len(sys.argv) == 2 and sys.argv[1] in ("-", "--", "-h", "--h", "-help", "--help"):
+        print(
+            "Usage:\n"
+            " python <script_path> <path_of_scm> <path_of_xlsx>\n\n"
+        )
+        sys.exit(0)
+
+    if len(sys.argv) < 3:
+        print(
+            "Usage:\n"
+            " python <script_path> <path_of_scm> <path_of_xlsx>\n\n"
+        )
+        sys.exit(1)
+
+    try:
+        main()
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)
