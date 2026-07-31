@@ -1,0 +1,64 @@
+def extract_input_pins(scm_lines):
+    text = "".join(scm_lines)
+    m = re.search(r":input\s*'\(([^)]*)\)", text)
+    if not m:
+        raise ValueError("Could not find :input line in the .scm file.")
+    return m.group(1).split()
+
+
+def parse_forbidden_expr(expr, pin_order):
+    rows = []
+    index = {p: i for i, p in enumerate(pin_order)}
+
+    for group in re.findall(r"\(([^()]*)\)", expr):
+        if "=" not in group:
+            continue
+
+        left, right = group.split("=", 1)
+        pins = left.split()
+
+        for alt in right.split("|"):
+            alt = alt.strip()
+
+            if len(alt) != len(pins):
+                print(f"Warning: {len(pins)} pins but {len(alt)} values in ({group})")
+                continue
+
+            slots = ["-"] * len(pin_order)
+            for pin, val in zip(pins, alt):
+                if pin in index:
+                    slots[index[pin]] = val
+                else:
+                    print(f"Warning: pin {pin} not in :input line")
+
+            rows.append("(" + " ".join(slots) + ")")
+
+    return rows
+
+
+def norm_key(s):
+    return s.strip().lower().replace("-", "_")
+
+def build_table3_dict(table3_rows):
+    d = {}
+    for row in table3_rows:
+        key = row.get("Forbidden", "").strip()
+        if key:
+            d[norm_key(key)] = row.get("Forbidden Pins", "").strip()
+    return d
+
+
+
+
+forbidden_key = row.get("Forbidden", "").strip()
+forbidden_rows = parse_forbidden_expr(
+    table3_map.get(norm_key(forbidden_key), ""), pin_order
+)
+
+
+
+
+
+
+
+
