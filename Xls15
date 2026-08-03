@@ -1,0 +1,62 @@
+def extract_scm_attribute(scm_lines, attr):
+    text = "".join(scm_lines)
+    m = re.search(re.escape(attr) + r"\s*'", text)
+    if not m:
+        return ""
+
+    i = text.find("(", m.end())
+    if i == -1:
+        return ""
+
+    depth = 0
+    for j in range(i, len(text)):
+        if text[j] == "(":
+            depth += 1
+        elif text[j] == ")":
+            depth -= 1
+            if depth == 0:
+                return text[i + 1:j].strip()
+    return ""
+
+
+def apply_pin_voltage_overrides(base, overrides):
+    ov = {}
+    for grp in re.findall(r"\(([^()]*)\)", overrides):
+        toks = grp.split()
+        if toks:
+            ov[toks[0]] = grp.strip()
+
+    result = []
+    seen = set()
+
+    for grp in re.findall(r"\(([^()]*)\)", base):
+        toks = grp.split()
+        key = toks[0] if toks else ""
+        if key in ov:
+            result.append("(" + ov[key] + ")")
+            seen.add(key)
+        else:
+            result.append("(" + grp.strip() + ")")
+
+    for key, val in ov.items():
+        if key not in seen:
+            print(f"Warning: pin-voltage override {key} not found in .scm :pin-voltage")
+            result.append("(" + val + ")")
+
+    return "".join(result)
+
+
+base_pin_voltage = extract_scm_attribute(scm_lines, ":pin-voltage")
+
+
+
+pv_override = row.get("Pin-Voltage", "").strip()
+        if pv_override:
+            pin_voltage = apply_pin_voltage_overrides(base_pin_voltage, pv_override)
+        else:
+            pin_voltage = ""
+
+
+
+if pin_voltage:
+        out.append(f"\t\t\t\t\t\t(:pin-voltage ({pin_voltage}))\n")
