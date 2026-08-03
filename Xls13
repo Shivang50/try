@@ -1,0 +1,17 @@
+def format_forbidden(rows, indent="\t\t\t\t\t\t"):
+    if not rows:
+        return None
+    if len(rows) == 1:
+        return f"{indent}(:forbidden ({rows[0]}))\n"
+
+    pad = indent + " " * len("(:forbidden (")
+    lines = [f"{indent}(:forbidden ({rows[0]})\n"]
+    for r in rows[1:-1]:
+        lines.append(f"{pad}{r}\n")
+    lines.append(f"{pad}{rows[-1]}))\n")
+    return "".join(lines)
+
+
+fb = format_forbidden(forbidden)
+    if fb:
+        out.append(fb)
