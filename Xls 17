@@ -1,0 +1,24 @@
+def build_electrical(output_pins, electrical_value):
+    if not output_pins or not electrical_value:
+        return ""
+
+    ev = electrical_value.strip()
+    if not ev.startswith("("):
+        ev = "(" + ev + ")"
+
+    parts = []
+    for pin in [p.strip() for p in output_pins.split("|") if p.strip()]:
+        parts.append(f"(- - {pin} -){ev}")
+
+    return "(" + "".join(parts) + ")"
+
+
+output_pin = row.get("Output Pin", "") or row.get("output Pin", "")
+        electrical = build_electrical(
+            output_pin.strip(),
+            row.get("Electrical", "").strip()
+        )
+
+
+if electrical:
+        out.append(f"\t\t\t\t\t\t(:electrical ({electrical}))\n")
