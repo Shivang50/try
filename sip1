@@ -1,0 +1,104 @@
+
+"""
+Extract unique cell name, pin name, and port layer information from a LEF file.
+
+Usage:
+    python extract_lef_ports.py input.lef
+    python extract_lef_ports.py input.lef -o output.csv
+"""
+
+import re
+import csv
+import argparse
+
+
+def parse_lef(lef_path: str):
+    records = []
+
+    macro_name = None
+    pin_name = None
+    in_port = False
+
+    macro_re = re.compile(r'^\s*MACRO\s+(\S+)\s*$')
+    pin_re = re.compile(r'^\s*PIN\s+(\S+)\s*$')
+    port_re = re.compile(r'^\s*PORT\s*$')
+    layer_re = re.compile(r'^\s*LAYER\s+(\S+)\s*;')
+    end_re = re.compile(r'^\s*END\s+(\S+)\s*$')
+    end_port_re = re.compile(r'^\s*END\s*$')
+
+    with open(lef_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.rstrip()
+
+            m = macro_re.match(line)
+            if m:
+                macro_name = m.group(1)
+                pin_name = None
+                in_port = False
+                continue
+
+            m = pin_re.match(line)
+            if m:
+                pin_name = m.group(1)
+                in_port = False
+                continue
+
+            if port_re.match(line):
+                in_port = True
+                continue
+
+            if in_port:
+                m = layer_re.match(line)
+                if m and macro_name and pin_name:
+                    records.append((macro_name, pin_name, m.group(1)))
+                    continue
+
+                if end_port_re.match(line):
+                    in_port = False
+                    continue
+
+            m = end_re.match(line)
+            if m:
+                end_name = m.group(1)
+
+                if pin_name and end_name == pin_name:
+                    pin_name = None
+                    in_port = False
+                    continue
+
+                if macro_name and end_name == macro_name:
+                    macro_name = None
+                    pin_name = None
+                    in_port = False
+                    continue
+
+    # Uniquify + sort
+    unique_records = sorted(set(records))
+    return unique_records
+
+
+def write_csv(records, out_csv):
+    with open(out_csv, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["cell_name", "pin_name", "port_layer"])
+        writer.writerows(records)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Extract unique cell/pin/port-layer info from LEF.")
+    parser.add_argument("lef_file", help="Input LEF file")
+    parser.add_argument("-o", "--output", help="Output CSV file")
+    args = parser.parse_args()
+
+    records = parse_lef(args.lef_file)
+
+    if args.output:
+        write_csv(records, args.output)
+        print(f"Wrote {len(records)} unique records to {args.output}")
+    else:
+        for cell_name, pin_name, port_layer in records:
+            print(f"{cell_name},{pin_name},{port_layer}")
+
+
+if __name__ == "__main__":
+    main()
