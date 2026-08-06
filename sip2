@@ -1,0 +1,42 @@
+Write check_sip_lef() function which i will call from my main function as: sip_lef_generation=check_sip_lef()
+
+First check if this path exist, means if <libname>.lef file is present or not :/work/uptpluscache/areas/trd/<product_name>/<mat10_version>/SIP/physical/<libname>.lef
+-If file is not present then return No
+-If this file is present then do the further task by using the above code that I gave you.
+
+Do not change the logic of above code, just do some modifications in it as per my requirement:
+Global variables in my code are: UPT_BASE, product_name, mat10_version, libname
+UPT_BASE = "/work/uptpluscache/areas/trd"
+
+First argument is used to get the path of LEF file: parser.add_argument("lef_file", help="Input LEF file")
+So instead of it, I want to give this path:/work/uptpluscache/areas/trd/<product_name>/<mat10_version>/SIP/physical/<libname>.lef
+output file should be generated in the present working directory and name it as "sip_lef_dump.txt".
+
+
+Output file sample can be like this:
+P18_COMPENSATION_1V83V3_23FPF_WBMI_LIN_H,vdde,nitride
+P18_COMPENSATION_1V83V3_23FPF_WBMI_LIN_H,vdde,LB
+P18_COMPENSATION_1V83V3_23FPF_WBMI_LIN_V,vsse,LB
+P18_COMPENSATION_1V83V3_H,ANSRCCORE[0],C4
+P18_COMPENSATION_1V83V3_H,ANSRCCORE[2],C4
+P18_COMPENSATION_1V83V3_H,ANSRCCORE[2],C5
+P18_COMPENSATION_1V83V3_H,ANSRCCORE[3],C4
+
+Output file will be in csv format and you have to look only in the third column:
+Make a list of unique values of the third column like this:[nitride,LB,C4,C5]
+-if you get "nitride" in this list then return Yes.
+-if suppose nitride is not present then for the remaining values you have to check one by one if they are present in report.log with pin then return Yes, otherwise return No.
+
+report.log sample:
+Comparing Lib:P18_IO_23FPF_COMPENSATION_1V83V3_SG_EG_EZG	Cell:P18_COMPENSATION_1V83V3_23FPF_WBMI_LIN_H		View:layout
+difference on lpp:("C5" "drawing")
+difference on lpp:("C5" "pin")
+
+Suppose if:
+1. LB,C4,C5 are not present in report.log then return No.
+2. C5 is present in report.log only with drawing and not with pin then return No.
+3. C5 is present in report.log with pin then return Yes.
+
+report.log file location:
+output_dir = cwd / "Output"
+report_log = output_dir / "report.log"
