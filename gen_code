@@ -1,0 +1,4177 @@
+import os
+import glob
+import subprocess
+import sys
+import shutil
+import re
+import html
+from pathlib import Path
+import urllib3
+import requests
+import hashlib
+import random
+import time
+import csv
+from typing import Set
+import json
+import logging
+from datetime import datetime
+import gzip
+import argparse
+
+# Disable SSL warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+CDS_LIB_PATH = str(Path.cwd() / "cds.lib")
+CDS_LIB_TASK1_PATH = str(Path.cwd() / "cds.lib.task1")
+
+SKILL_1 = "/work/LIPAS2/SHIVAM/SCRIPTS/OA_XOR_scripts/replay1.il"
+SKILL_2 = "/work/LIPAS2/SHIVAM/SCRIPTS/OA_XOR_scripts/replay.il"
+
+UPT_BASE = "/work/uptpluscache/areas/trd"
+TOPCELL_FILENAME = "topcell.list"
+TEMPLATE_FILENAME = "user_template"
+OUTLOG_FILENAME = "out.log"
+OUTPUT_CSV = "terminal_diff_report.csv"
+BE_SUFFIX = "_BE_tlist.log"
+MAT10_SUFFIX = "_MAT10_tlist.log"
+TERMINAL_LOG_DIR = Path.cwd() / "Intermediate_logs" / "Terminal_Logs"
+SIP_LEF_DUMP = "sip_lef_dump.txt"
+
+#REQUIRED_KEYS = ["product_name", "mat10_version", "be_version or mat10_2_version", "dpds", "pdk", "ltk", "metal_option", "process_option"]
+REQUIRED_KEYS = ["product_name", "mat10_version", "be_version or mat10_2_version", "dpds", "pdk",]
+
+OPTIONAL_KEYS = ["ltk", "metal_option", "process_option", "derivation_setup_extra_options",]
+
+GDS_VIEWS = ["gds", "cdl", "oa_symbol", "oa_adms", "icc_layout",]
+LEF_VIEWS = ["gds", "cdl", "oa_abstract", "oa_symbol", "cds_soc_lef", "oa_adms", "icc_layout", "icc_fram_update", "icc_fram_create_from_cds_soc_lef", "apache_physical", "cds_voltus", "icc2_detailed_lef", "icc2_ndm_detailed_abstract",]
+SIP_LEF_VIEWS = ["gds", "cdl", "oa_abstract", "oa_symbol", "cds_soc_lef", "oa_adms", "icc_layout", "sip_lef", "icc_fram_update", "icc_fram_create_from_cds_soc_lef", "apache_physical", "cds_voltus", "icc2_detailed_lef", "icc2_ndm_detailed_abstract",]
+
+api_key = "6a932be7-e056-4d4f-b4a5-78f7459057e2"
+client_app_name = "gtrd_library_cad_eda_management"
+
+
+# Maps an impact "source" (row in the report) to the view-list it pulls in.
+# SIP LEF is intentionally dropped for now.
+IMPACT_SOURCE_TO_LIST = {
+    "GDS": "GDS_VIEWS",
+    "LEF": "LEF_VIEWS",
+}
+
+# The actual list objects, resolved by name. targeted_views is injected at runtime.
+LIST_REGISTRY = {
+    "GDS_VIEWS": GDS_VIEWS,
+    "LEF_VIEWS": LEF_VIEWS,
+    # "SIP_LEF_VIEWS": SIP_LEF_VIEWS,   # dropped for now
+    # "targeted_views" added dynamically in run_llm_agent
+}
+
+
+
+# Add generation wali directories also in backup--------------------------------------------------------------------
+def backup_existing_outputs():
+    cwd = Path.cwd()
+    analyzer_dir = cwd / "Analyzer"
+    backup_dir = cwd / "Backup"
+
+    items_to_backup = []
+
+    if analyzer_dir.exists():
+        items_to_backup.append(analyzer_dir)
+    if not items_to_backup:
+        return
+
+    backup_dir.mkdir(parents=True, exist_ok=True)
+
+    for src in items_to_backup:
+        dst = backup_dir / src.name
+
+        if dst.exists():
+            if dst.is_dir():
+                shutil.rmtree(dst)
+            else:
+                dst.unlink()
+
+        shutil.move(str(src), str(dst))
+
+def print_libderiv_techno_root():
+    result = subprocess.run(
+        ["csh", "-c", "echo $LIBDERIV_TECHNO_ROOT"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Failed to read LIBDERIV_TECHNO_ROOT\n"
+            f"stderr:\n{result.stderr}"
+        )
+
+    print("LIBDERIV_TECHNO_ROOT =", result.stdout.strip())
+
+
+def load_ucdprod_env(ucdprod_dir: Path):
+    ucdprod_dir = ucdprod_dir.resolve()
+
+    csh_cmd = f"""
+        cd "{ucdprod_dir}"
+        setenv UCDPRJDIR $PWD
+        eval `ukerEnv`
+        if ($status != 0) then
+            echo "ERROR: eval `ukerEnv` failed" >&2
+            exit 1
+        endif
+        echo "ucdprod environment loaded successfully."
+        env
+    """
+
+    try:
+        result = subprocess.run(
+            ["csh", "-c", csh_cmd],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except subprocess.CalledProcessError as e:
+        print("Failed to load ucdprod environment.")
+        if e.stderr:
+            print("stderr from csh:\n", e.stderr)
+        sys.exit(1)
+
+    stdout_lines = result.stdout.splitlines()
+    if stdout_lines:
+        print(stdout_lines[0])
+
+    for line in stdout_lines[1:]:
+        if "=" in line:
+            key, value = line.split("=", 1)
+            os.environ[key] = value
+
+
+def get_basic_lib_path():
+    """
+    Implements:
+      virtuosoPath=`which virtuoso | cut -d"/" -f1,2,3,4,5,6`
+      basicLibPath="$virtuosoPath/tools.lnx86/dfII/etc/cdslib/basic"
+    Returns the full basicLibPath string, or None if virtuoso is not found.
+    """
+	
+    try:
+        which_res = subprocess.run(
+            ["bash", "-c", "which virtuoso"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True,
+        )
+        virtuoso_full = which_res.stdout.strip()
+        if not virtuoso_full:
+            return None
+    except subprocess.CalledProcessError:
+        return None
+
+    try:
+        cut_res = subprocess.run(
+            ["bash", "-c", f'echo "{virtuoso_full}" | cut -d"/" -f1,2,3,4,5,6'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True,
+        )
+        virtuoso_path = cut_res.stdout.strip()
+        if not virtuoso_path:
+            return None
+    except subprocess.CalledProcessError:
+        return None
+
+    return f"{virtuoso_path}/tools.lnx86/dfII/etc/cdslib/basic"
+
+
+def build_three_lines(libname: str, libpath_for_third: str, add_xorlib: bool = False):
+    """
+    Build the lines that must be written to cds file:
+      1) SOFTINCLUDE <DKITROOT>/<something>.cdslib
+      2) DEFINE basic <basicLibPath>
+      3) DEFINE <libname> <libpath_for_third>/CADENCE/CDSOA or OA
+      4) DEFINE XORLIB <cwd>/XORLIB   [optional]
+    """
+    dkitroot = os.environ.get("DKITROOT")
+    if not dkitroot:
+        raise RuntimeError("DKITROOT is not set in the environment.")
+
+    pattern = os.path.join(dkitroot, "*.cdslib")
+    matches = glob.glob(pattern)
+
+    if not matches:
+        raise RuntimeError(f"No .cdslib file found under DKITROOT: {pattern}")
+
+    cdslib_path = matches[0]
+    soft_line = f"SOFTINCLUDE {cdslib_path}\n"
+
+    basic_lib_path = get_basic_lib_path()
+    if not basic_lib_path:
+        raise RuntimeError("Could not determine virtuoso path (basicLibPath).")
+    basic_line = f"DEFINE basic {basic_lib_path}\n"
+
+    cdsoa_path = os.path.join(libpath_for_third, "CADENCE", "CDSOA")
+    oa_path = os.path.join(libpath_for_third, "OA")
+
+    if os.path.isdir(cdsoa_path):
+        third_target = cdsoa_path
+    elif os.path.isdir(oa_path):
+        third_target = oa_path
+    else:
+        raise RuntimeError("Could not find valid directory structure")
+
+    third_line = f"DEFINE {libname} {third_target}\n"
+
+    lines = [soft_line, basic_line, third_line]
+
+    if add_xorlib:
+        xorlib_path = str(Path.cwd() / "XORLIB")
+        xor_line = f"DEFINE XORLIB {xorlib_path}\n"
+        lines.append(xor_line)
+
+    return lines
+
+def get_techlib():
+    script_dire = Path(__file__).resolve().parent #dir->dire, csh_cmd->csh_cmmd
+    dkitroot = os.environ.get("DKITROOT")
+    if not dkitroot:
+        raise RuntimeError("PDK not set in environment")
+ 
+    csh_cmmd = f"""
+        cd "{script_dire}"
+        setenv UCDPRJDIR $PWD
+        eval `ukerEnv`
+        if ($status != 0) then
+            echo "ERROR: eval `ukerEnv` failed" >&2
+            exit 1
+        endif
+ 
+        if (! $?DKITROOT) then
+            echo "ERROR: DKITROOT not set after ukerEnv" >&2
+            exit 1
+        endif
+ 
+        set techlib = `piGetInfo "{dkitroot}/" processLibName`
+        if ($status != 0) then
+            echo "ERROR: piGetInfo failed" >&2
+            exit 1
+        endif
+        echo "$techlib"
+    """
+ 
+    try:
+        result = subprocess.run(
+            ["csh", "-c", csh_cmmd],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(
+            "Failed to get techlib via piGetInfo.\n"
+            f"STDOUT:\n{e.stdout}\n"
+            f"STDERR:\n{e.stderr}"
+        ) from e
+ 
+    lines = [ln.strip() for ln in result.stdout.splitlines() if ln.strip()]
+    if not lines:
+        raise RuntimeError(
+            "piGetInfo returned an empty techlib.\n"
+            f"STDOUT:\n{result.stdout}\n"
+            f"STDERR:\n{result.stderr}"
+        )
+ 
+    techlib_variable = lines[-1].replace("\x1b[0m", "").strip()
+    return techlib_variable
+
+def overwrite_cds_lib(cds_lib_path: str, libname: str, libpath_for_third: str, add_xorlib: bool = False):
+    lines = build_three_lines(libname, libpath_for_third, add_xorlib=add_xorlib)
+
+    dir_name = os.path.dirname(cds_lib_path)
+    if dir_name:  # if file is in a subdirectory, ensure it exists
+        os.makedirs(dir_name, exist_ok=True)
+
+    with open(cds_lib_path, "w") as f:
+        f.writelines(lines)
+
+def cp2pwd (skill: str) -> Path:
+    skill_path = Path(skill)
+    if not skill_path.is_file():
+        raise RuntimeError(f"Source file not found: {skill}")
+    dst_path = Path.cwd() / skill_path.name
+    shutil.copy2(skill_path, dst_path)
+    return dst_path
+
+def edit_replay1(path: Path, reflib: str, techlib: str, topcell_list: str):
+    lines = path.read_text().splitlines()
+    new_lines = []
+    reflib_done = False
+    top_done = False
+    tech_done = False
+
+    new_reflib = f'reflib="{reflib}"'
+    new_top = f'topCellList="{topcell_list}"'
+    new_tech = f'techlib="{techlib}"'
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("reflib="):
+            new_lines.append(new_reflib)
+            reflib_done = True
+        elif stripped.startswith("topCellList="):
+            new_lines.append(new_top)
+            top_done = True
+        elif stripped.startswith("techlib="):
+            new_lines.append(new_tech)
+            tech_done = True
+        else:
+            new_lines.append(line)
+
+    if not reflib_done:
+        new_lines.append(new_reflib)
+    if not top_done:
+        new_lines.append(new_top)
+    if not tech_done:
+        new_lines.append(new_tech)
+
+    path.write_text("\n".join(new_lines) + "\n")
+
+def edit_replay(path: Path, reflib: str, topcell_list: str):
+    lines = path.read_text().splitlines()
+    new_lines = []
+    reflib_done = False
+    top_done = False
+    tech_done = False
+
+    new_reflib = f'reflib="{reflib}"'
+    new_top = f'topCellList="{topcell_list}"'
+
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("reflib="):
+            new_lines.append(new_reflib)
+            reflib_done = True
+        elif stripped.startswith("topCellList="):
+            new_lines.append(new_top)
+            top_done = True
+        else:
+            new_lines.append(line)
+
+    if not reflib_done:
+        new_lines.append(new_reflib)
+    if not top_done:
+        new_lines.append(new_top)
+
+    path.write_text("\n".join(new_lines) + "\n")
+
+def CAD_VIEW_IMPACT_ANALYZER(skill_filename: str):
+    skill_path = Path.cwd() / skill_filename
+    if not skill_path.is_file():
+        raise RuntimeError(f"SKILL script not found: {skill_path}")
+    lsf_project = "p18_p3a"
+
+    try:
+        result = subprocess.run(
+            ["bsub", "-P", lsf_project, "-q", "long", "-Ip", "virtuoso", "-nograph", "-replay", str(skill_path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True,
+        )
+    except subprocess.CalledProcessError as e:
+        print(f"Error while running SKILL script {skill_path}:")
+        if e.stderr:
+            print("stderr from reg/virtuoso:\n", e.stderr)
+        raise
+
+
+    print(result.stdout)
+
+
+
+def read_user_template(template_path: str):
+    """
+    Read user_template from the given path.
+
+    Mandatory keys:
+      - PRODUCT_NAME
+      - MAT10_VERSION
+      - BE_VERSION OR MAT10_2_VERSION
+      - DPDS
+      - PDK
+
+    Optional keys:
+      - LTK
+      - METAL_OPTION
+      - PROCESS_OPTION
+      - DERIVATION_SETUP_EXTRA_OPTIONS
+      - REFLIB_TAG
+    """
+
+    filepath = Path(template_path).expanduser().resolve()
+
+    if not filepath.is_file():
+        raise FileNotFoundError(f"user_template not found: {filepath}")
+
+    values = {}
+    reflib_pairs = []
+
+    with filepath.open("r", encoding="utf-8") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+
+            if not line or "=" not in line:
+                continue
+
+            key_part, value_part = line.split("=", 1)
+            key = key_part.strip().lower()
+            value = value_part.strip()
+
+            # Parse REFLIB_TAG
+            if key == "reflib_tag":
+                value = value.strip()
+
+                if not value.startswith("[") or not value.endswith("]"):
+                    raise ValueError(f"Invalid REFLIB_TAG format: {value}")
+
+                inner = value[1:-1].strip()
+                if not inner:
+                    raise ValueError("REFLIB_TAG is present but empty")
+
+                entries = inner.split("][")
+                for entry in entries:
+                    if "@" not in entry:
+                        raise ValueError(f"Invalid REFLIB_TAG entry (missing @): [{entry}]")
+                    reflib_name, version = entry.split("@", 1)
+                    reflib_pairs.append((reflib_name.strip(), version.strip()))
+                continue
+
+            # Store all normal keys
+            values[key] = value
+
+    # Validate mandatory keys only
+    missing_keys = [k for k in REQUIRED_KEYS if k not in values]
+    if missing_keys:
+        raise ValueError(
+            "Missing required fields in 'user_template': "
+            + ", ".join(missing_keys)
+        )
+
+    empty_required = [k for k in REQUIRED_KEYS if values.get(k, "") == ""]
+    if empty_required:
+        raise ValueError(
+            "The following required fields are empty in 'user_template': "
+            + ", ".join(empty_required)
+        )
+
+    # Add reflib values if present
+    for idx, (reflib, version) in enumerate(reflib_pairs, start=1):
+        values[f"reflib{idx}"] = reflib
+        values[f"version{idx}"] = version
+
+    values["reflib_count"] = len(reflib_pairs)
+
+    # Optional keys may or may not exist; that's fine
+    return values
+
+def insert_ltk_after_libderiv(ucdprod_path: Path, ltk_value: str):
+    """
+    Insert ltk_value immediately after the first line that starts with 'libderiv'
+    in the .ucdprod file, shifting the following lines down.
+    """
+
+    if not ucdprod_path.is_file():
+        raise FileNotFoundError(f".ucdprod file not found: {ucdprod_path}")
+
+    ltk_line = ltk_value.strip()
+
+    with ucdprod_path.open("r", encoding="utf-8") as f:
+        lines = f.readlines()
+
+    # If the ltk line is already present, do nothing
+    if any(line.strip() == ltk_line for line in lines):
+        print(f"ltk already present in {ucdprod_path}, skipping insertion.")
+        return
+
+    new_lines = []
+    inserted = False
+
+    for line in lines:
+        new_lines.append(line)
+
+        if not inserted and line.strip().startswith("libderiv"):
+            new_lines.append(ltk_line + "\n")
+            inserted = True
+
+    if not inserted:
+        raise ValueError(f"No libderiv line found in {ucdprod_path}")
+
+    with ucdprod_path.open("w", encoding="utf-8") as f:
+        f.writelines(new_lines)
+
+
+def extract_libraries_from_reflibs(user_values: dict, upt_base: str = UPT_BASE):
+    """
+    For each reflib{n}/version{n} pair in user_values:
+      - open <UPT_BASE>/<reflib>/<version>/packaging/vc.bbview
+      - extract the LIBRARY value
+      - return it as library{n}
+    """
+    libraries = {}
+    reflib_count = user_values.get("reflib_count", 0)
+
+    if reflib_count == 0:
+        return libraries
+
+    for idx in range(1, reflib_count + 1):
+        reflib_key = f"reflib{idx}"
+        version_key = f"version{idx}"
+        library_key = f"library{idx}"
+
+        reflib = user_values.get(reflib_key)
+        version = user_values.get(version_key)
+
+        if not reflib or not version:
+            raise ValueError(f"Missing {reflib_key} or {version_key}")
+
+        bbview_path = Path(upt_base) / reflib / version / "packaging" / "vc.bbview"
+
+        if not bbview_path.is_file():
+            raise FileNotFoundError(f"vc.bbview not found: {bbview_path}")
+
+        library_value = None
+        with bbview_path.open("r", encoding="utf-8", errors="ignore") as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if line.startswith("LIBRARY "):
+                    parts = line.split(maxsplit=1)
+                    if len(parts) == 2:
+                        library_value = parts[1].strip()
+                        break
+
+        if library_value is None:
+            raise ValueError(f"LIBRARY entry not found in: {bbview_path}")
+
+        libraries[library_key] = library_value
+
+    return libraries
+
+
+def run_gen_dot_ucdprod(dpds_value: str, pdk_value: str):
+
+    GEN_DOT_UCDPROD_PATH = Path("/work/LIPAT/USER_AREAS/SHIVANG/correct_ai_scripts/Final_Script/Scripts/gen_dot_ucdprod.csh")
+
+    scrippt_path = GEN_DOT_UCDPROD_PATH
+
+    if not scrippt_path.is_file():
+        raise RuntimeError(
+            f"gen_dot_ucdprod.csh not found: {scrippt_path}"
+        )
+
+    dpds_parts = dpds_value.split(maxsplit=1)
+    pdk_parts = pdk_value.split(maxsplit=1)
+
+    if len(dpds_parts) != 2:
+        raise ValueError("dpds must be: name version")
+
+    if len(pdk_parts) != 2:
+        raise ValueError("PDK must be: name version")
+
+    env = os.environ.copy()
+
+    env["DPDS_NAME"] = dpds_parts[0]
+    env["DPDS_VERSION"] = dpds_parts[1]
+
+    env["PDK_NAME"] = pdk_parts[0]
+    env["PDK_VERSION"] = pdk_parts[1]
+
+    print("\nRunning gen_dot_ucdprod.csh ...")
+
+    result = subprocess.run(
+        ["csh", str(scrippt_path)],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+    )
+
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Failed to run gen_dot_ucdprod.csh\n"
+            f"stdout:\n{result.stdout}\n"
+            f"stderr:\n{result.stderr}"
+        )
+    print("gen_setup completed")
+
+
+def run_dssc_query(product_name: str, outlog_path: str):
+
+    # Build the dssc command using the given product_name
+    dssc_cmd = (
+        'dssc uptplus query '
+        '-type "Product Deliverable|Target Version" '
+        f'-where "NAME={product_name}" '
+        '-format csv '
+        '-select "NAME,REVISION" '
+        f'-outputfile "{outlog_path}"'
+    )
+
+    # Full shell command: source env, then run dssc
+    shell_cmd = (
+        'source /work/uptplus/uptplus.csh 1; '
+        + dssc_cmd
+    )
+
+    # Run in a csh-compatible shell; if your environment uses bash, adapt accordingly.
+    # Using shell=True so that 'source' works (it's a shell built-in).
+    result = subprocess.run(
+        shell_cmd,
+        shell=True,
+        executable="/bin/csh",  # adjust if needed (e.g. "/bin/tcsh")
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Failed to run dssc query.\n"
+            f"Command: {shell_cmd}\n"
+            f"stdout:\n{result.stdout}\n"
+            f"stderr:\n{result.stderr}"
+        )
+
+
+def validate_product_and_version_with_outlog(product_name: str, version: str, outlog_path: str):
+    """
+    Read out.log (CSV: NAME,REVISION) and verify that: product_name exists as NAME; version matches at least one REVISION for that NAME
+    """
+    if not os.path.isfile(outlog_path):
+        raise ValueError(
+            f"'{OUTLOG_FILENAME}' not found after running dssc query. "
+            "Cannot validate Product_name and version."
+        )
+
+    matching_revisions = set()
+    any_name_match = False
+
+    with open(outlog_path, "r", encoding="utf-8") as f:
+        for i, line in enumerate(f):
+            line = line.strip()
+            if not line:
+                continue
+
+            # Skip header line if present
+            if i == 0 and line.upper().startswith("NAME,REVISION"):
+                continue
+
+            parts = line.split(",")
+            if len(parts) < 2:
+                continue  # malformed line, skip
+
+            name = parts[0].strip()
+            revision = parts[1].strip()
+
+            if name == product_name:
+                any_name_match = True
+                matching_revisions.add(revision)
+
+    # Check Product_name present
+    if not any_name_match:
+        raise ValueError(
+            f"Product_name '{product_name}' from '{TEMPLATE_FILENAME}' "
+            f"does not match any NAME entry in '{OUTLOG_FILENAME}'."
+        )
+
+    # Check MAT10_version matches one of the revisions
+    if version not in matching_revisions:
+        raise ValueError(
+            f"version '{version}'"
+            "is not present in uptplus for Product_name "
+            f"'{product_name}'.\n"
+            f"Available versions for this product: "
+            + (", ".join(sorted(matching_revisions)) if matching_revisions else "<none>")
+        )
+
+def replication_check(product_name: str, version: str) -> bool:
+    rep_path = os.path.join(UPT_BASE, product_name, version)
+    return os.path.isdir(rep_path)
+
+def replicate_to_upt(product_name: str, mat10_version: str):
+    objurl = (
+        f"sync://uptplus6.gnb.st.com:9006/Modules/"
+        f"{product_name}@{mat10_version}"
+    )
+    
+    
+    dssc_rep = (
+        'bsub -P p18_p3a -q reg -I '
+        'dssc uptplus replicate '
+        "-attribute 'area trd site noi' "
+        f'-objurl "{objurl}"'
+    )
+	
+    shell_rep = (
+        'source /work/uptplus/uptplus.csh 1; '
+        + dssc_rep
+    )
+    print("\nProduct/version not found in uptplus area. Triggering replication....\nPlease wait")
+    print("Command:", shell_rep)
+
+    # Run in a csh-compatible shell; if your environment uses bash, adapt accordingly.
+    # Using shell=True so that 'source' works (it's a shell built-in).
+    result = subprocess.run(
+        shell_rep,
+        shell=True,
+        executable="/bin/csh",  # adjust if needed (e.g. "/bin/tcsh")
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Failed to run dssc query.\n"
+            f"Command: {shell_rep}\n"
+            f"stdout:\n{result.stdout}\n"
+            f"stderr:\n{result.stderr}"
+        )
+    print("Replication completed")
+
+
+
+def wait_for_replication(product_name: str, version: str, check_interval: int = 60, timeout: int = 1800):
+    start_time = time.time()
+    print(
+        f"\nReplication check: NOT FOUND in '{UPT_BASE}' "
+        f"for product '{product_name}', version '{version}'."
+    )
+
+    print(
+        "\nWaiting for replication to complete..."
+    )
+
+    while True:
+
+        # Check again
+        if replication_check(product_name, version):
+
+            print(
+                f"\nReplication completed successfully for "
+                f"'{product_name}' version '{version}'."
+            )
+
+            return
+
+        elapsed = int(time.time() - start_time)
+
+        if elapsed >= timeout:
+
+            raise RuntimeError(
+                f"Timeout: replication not completed after "
+                f"{timeout // 60} minutes for "
+                f"{product_name} {version}"
+            )
+
+        remaining = timeout - elapsed
+
+        print(
+            f"Still waiting... "
+            f"checked after {elapsed // 60} minute(s). "
+            f"Next check in {check_interval} seconds."
+        )
+
+        time.sleep(check_interval)
+
+def derive_libpaths_from_upt(product_name: str, mat10_version: str, be_or_mat10_2_version: str):
+    base = Path(UPT_BASE)
+    libpath1 = base / product_name / mat10_version
+    libpath2 = base / product_name / be_or_mat10_2_version
+    return str(libpath1), str(libpath2)
+
+def parse_vc_bbview(vc_bbview_path: Path):
+    if not vc_bbview_path.is_file():
+        raise FileNotFoundError(f"vc.bbview not found: {vc_bbview_path}")
+
+    libname = None
+    methodology = None
+    process = None
+    topcell = []
+    in_cells_block = False
+
+    with vc_bbview_path.open("r", encoding="utf-8") as f:
+        for raw in f:
+            line = raw.strip()
+            if not line:
+                continue
+
+            if line.startswith("LIBRARY "):
+                parts = line.split()
+                if len(parts) >= 2:
+                    libname = parts[1].strip()
+
+            if line.startswith("METHODOLOGY "):
+                parts = line.split()
+                if len(parts) >= 2:
+                    methodology = parts[1].strip()
+
+            if line.startswith("PROCESS "):
+                parts = line.split()
+                if len(parts) >= 2:
+                    process = parts[1].strip()
+            
+            if line == "CELLS":
+                in_cells_block = True
+                continue
+
+            if line == "END":
+                in_cells_block = False
+                continue
+
+            if in_cells_block:
+                cell_name = line.split()[0]
+                topcell.append(cell_name)
+
+
+    if not libname:
+        raise RuntimeError(f"LIBRARY not found in {vc_bbview_path}")
+
+    if not methodology:
+        raise RuntimeError(f"METHODOLOGY not found in {vc_bbview_path}")
+
+    if not process:
+        raise RuntimeError(f"PROCESS not found in {vc_bbview_path}")
+
+    if not topcell:
+        raise RuntimeError(f"No cells found in CELLS block in {vc_bbview_path}")
+
+    return libname, methodology, process, topcell
+
+def write_topcell_list(topcell, outputfile: Path):
+    with outputfile.open("w", encoding="utf-8") as f:
+        for name in topcell:
+            f.write(f"{name}\n")
+
+# SETUPLOG_topcells
+
+
+def write_setuplog_topcell_list(libpath2: str):
+    search_paths = [
+        Path(libpath2) / "packaging" / "vc.bbview",
+        Path(libpath2) / "SETUPLOG" / "cell.list",
+        Path(libpath2) / "SETUPLOG" / "topcell.list",
+        Path(libpath2) / "SETUPLOG" / "CELLS" / "topcell.list",
+        Path(libpath2) / "SETUPLOG" / "REF_FILES" / "topcell.list",
+        Path(libpath2) / "SETUPLOG" / "REF_FILES" / "cell.list",
+    ]
+
+    source_file = None
+    for p in search_paths:
+        if p.is_file():
+            source_file = p
+            break
+
+    if source_file is None:
+        print(
+            "\n\nWARNING: No Topcell list file found in any of the expected paths in SETUPLOG.\n\n"
+        )
+        output_file = Path.cwd() / "SETUPLOG_topcell.list"
+        output_file.write_text("", encoding="utf-8")
+        return [], output_file, None
+
+    output_file = Path.cwd() / "SETUPLOG_topcell.list"
+
+    cells = []
+
+    # Special handling for vc.bbview
+    if source_file == Path(libpath2) / "packaging" / "vc.bbview":
+        in_cells_block = False
+
+        with source_file.open("r", encoding="utf-8") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line:
+                    continue
+
+                if line == "CELLS":
+                    in_cells_block = True
+                    continue
+
+                if line == "END":
+                    in_cells_block = False
+                    continue
+
+                if in_cells_block:
+                    cell_name = line.split()[0]
+                    cells.append(cell_name)
+
+    else:
+        contents = source_file.read_text(encoding="utf-8")
+        output_file.write_text(contents, encoding="utf-8")
+
+        with source_file.open("r", encoding="utf-8") as f:
+            for raw in f:
+                line = raw.strip()
+                if line:
+                    cells.append(line)
+
+    unique_cells = sorted(set(cells))
+
+    # Write normalized list to output file
+    output_file.write_text("\n".join(unique_cells) + ("\n" if unique_cells else ""), encoding="utf-8")
+
+    print(f"Selected source file for BE Topcell list: {source_file}")
+    print(f"BE Topcell list written to: {output_file}")
+    print(f"Number of Topcells in BE: {len(unique_cells)}")
+
+    return unique_cells, output_file, source_file
+
+
+
+
+
+
+####=========CHECK FOR NON-EMPTY LEAF CELL LIST===============########
+
+def nonempty_leafcell(libpath1: str) -> bool:
+
+    leafcell_list = Path(libpath1) / "INTERFACE" / "leafcell.list"
+
+    if not leafcell_list.is_file():
+        print(f"INFO: leafcell list not found: {leafcell_list}")
+        return False
+
+    with leafcell_list.open("r", encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                print(f"INFO: Non-empty leafcell list found: {leafcell_list}")
+                return True
+
+    print(f"INFO: leafcell list is empty: {leafcell_list}")
+    return False
+
+#==================CHECKING NON-EMPTY LEAF CELL LIST COMPLETED=============####
+
+
+
+########===========================LEAF CELLS DUMP STARTS================================##############
+
+
+def resolve_library_db_path(libpath: str) -> Path:
+    cdsoa_path = Path(libpath) / "CADENCE" / "CDSOA"
+    oa_path = Path(libpath) / "OA"
+
+    if cdsoa_path.is_dir():
+        return cdsoa_path
+    elif oa_path.is_dir():
+        return oa_path
+    else:
+        raise RuntimeError(
+            f"Could not find valid library DB path under '{libpath}'. "
+            f"Tried '{cdsoa_path}' and '{oa_path}'."
+        )
+        
+def get_cell_dirs_from_library_db(db_path: Path):
+    if not db_path.is_dir():
+        raise RuntimeError(f"Library DB path is not a directory: {db_path}")
+
+    cell_dirs = sorted(
+        p.name for p in db_path.iterdir()
+        if p.is_dir()
+    )
+
+    print(f"Found {len(cell_dirs)} directory entries under {db_path}")
+    return cell_dirs
+    
+def filter_leaf_cells(all_cells, topcells):
+    leaf_cells = []
+
+    topcell_set = set(topcells)
+
+    for cell in set(all_cells):
+        if cell == ".SYNC":
+            continue
+        if cell == "ALLCELLS":
+            continue
+        if cell.startswith("ALLCELLS_"):
+            continue
+        if cell in topcell_set:
+            continue
+
+        leaf_cells.append(cell)
+
+    leaf_cells = sorted(leaf_cells)
+
+    print(f"Filtered leaf cells count: {len(leaf_cells)}")
+    return leaf_cells
+        
+def write_cell_list(cells, output_file: Path):
+    with output_file.open("w", encoding="utf-8") as f:
+        for cell in cells:
+            f.write(f"{cell}\n")
+
+    print(f"Wrote {len(cells)} entries to: {output_file}")
+    
+######### ===============================LEAF_CELLS_DUMP ENDS========================######################################    
+
+#================LEAF CELLS COMPARISON STARTS===========================#####
+
+#def compare_leafcell_lists(mat10_leaf_cells, be_leaf_cells):
+#    mat10_set = set(mat10_leaf_cells)
+#    be_set = set(be_leaf_cells)
+
+#    added = sorted(be_set - mat10_set)
+#    removed = sorted(mat10_set - be_set)
+
+#    return {
+#        "added": added,
+#        "removed": removed,
+#    }
+
+
+#def write_leafcell_comparison_csv(output_csv: Path, cell_name: str, comparison_result: dict):
+#    """
+#    Write CSV with exactly:
+#      Cell Name, Added, Removed
+#    """
+#    with output_csv.open("w", newline="", encoding="utf-8") as f:
+#        writer = csv.writer(f)
+#        writer.writerow(["Cell Name", "Added", "Removed"])
+#        writer.writerow([
+#            cell_name,
+#            " ".join(comparison_result["added"]) if comparison_result["added"] else "",
+#            " ".join(comparison_result["removed"]) if comparison_result["removed"] else "",
+#        ])
+
+#    print(f"Leafcell comparison report written to: {output_csv}")
+    
+    
+#===============LEAF CELL COMPARIOSN ENDS=================## 
+
+
+
+
+
+def compare_cell_lists(reference_cells, candidate_cells):
+    ref_set = set(reference_cells)
+    cand_set = set(candidate_cells)
+
+    added = sorted(cand_set - ref_set)
+    removed = sorted(ref_set - cand_set)
+
+    return {
+        "cells_added": added,
+        "removed": removed
+
+    }
+
+
+def topcell_comparison(output_csv: Path, comparison_result: dict):
+    added_cells = comparison_result["cells_added"]
+    removed_cells = comparison_result["removed"]
+
+    with output_csv.open("w", newline="", encoding="utf-8") as f:
+
+        writer = csv.writer(f)
+
+        # Header
+        writer.writerow([
+            "Cells Added",
+            "Cells Removed"
+        ])
+
+        # Data row
+        writer.writerow([
+            " ".join(added_cells) if added_cells else "",
+            " ".join(removed_cells) if removed_cells else ""
+        ])
+
+        # -------------------------
+        # Build Status message
+        # -------------------------
+
+        if added_cells and removed_cells:
+
+            status = (
+                f"Status: "
+                f"{', '.join(added_cells)} cells are added "
+                f"and "
+                f"{', '.join(removed_cells)} "
+                f"{'cell is' if len(removed_cells) == 1 else 'cells are'} removed"
+            )
+
+        elif added_cells:
+
+            status = (
+                f"Status: "
+                f"{', '.join(added_cells)} "
+                f"{'cell is' if len(added_cells) == 1 else 'cells are'} added"
+            )
+
+        elif removed_cells:
+
+            status = (
+                f"Status: "
+                f"{', '.join(removed_cells)} "
+                f"{'cell is' if len(removed_cells) == 1 else 'cells are'} removed"
+            )
+
+        else:
+
+            status = "Status: no cells are added or removed"
+
+        # Write status line
+        writer.writerow([])
+        writer.writerow([status])
+
+    #print(f"Topcell comparison report written to: {output_csv}")
+    print(f"Topcell comparison report written to: Intermediate_logs/Cell_Diff/topcell_diff_report.csv")
+
+
+
+def extract_cell_names_from_report(report_path: str):
+    cell_names = []
+
+    if not os.path.exists(report_path):
+        return cell_names
+
+    cell_pattern = re.compile(r'Cell:([^\s\t]+)')
+
+    with open(report_path, "r", encoding="utf-8") as f:
+        for line in f:
+            match = cell_pattern.search(line)
+            if match:
+                cell_name = match.group(1).strip()
+                if cell_name and cell_name not in cell_names:
+                    cell_names.append(cell_name)
+
+    return cell_names
+
+
+
+
+			
+# Read, filter, sort LPP lines
+def read_diff_lines_from_log(file_path="Output/report.log"):
+
+    unique_lpps = set()
+
+    try:
+
+        diff_dir = os.path.join(os.getcwd(), "Diff_Logs")
+        full_path = os.path.join(os.getcwd(), file_path)
+
+        if not os.path.exists(full_path):
+
+            print(
+                f"Error: {file_path} not found "
+                "in current directory."
+            )
+
+            sys.exit(1)
+
+        pattern = re.compile(
+            r'difference[s]?\s+on\s+lpp\s*:\s*\("([^"]+)"\s+"([^"]+)"\)',
+            re.IGNORECASE
+        )
+
+        with open(full_path, "r") as file:
+
+            for line in file:
+
+                line = line.strip()
+
+                match = pattern.search(line)
+
+                if match:
+
+                    layer = match.group(1).strip()
+                    purpose = match.group(2).strip()
+
+                    # Exclude instance drawing
+                    if (
+                        layer.lower() == "instance"
+                        and purpose.lower() == "drawing"
+                    ):
+                        continue
+
+                    unique_lpps.add((layer, purpose))
+
+        if not unique_lpps:
+            #print("No valid LPP differences found.")
+            cell_names = extract_cell_names_from_report(full_path)
+            print("No layout differences present for cells: "+ ", ".join(cell_names))
+            move_files_to_intermediate_logs()
+            sys.exit(1)
+
+        sorted_lpps = sorted(unique_lpps)
+
+        diff_lines = [
+
+            f'difference on lpp:("{layer}" "{purpose}")'
+
+            for layer, purpose
+            in sorted_lpps
+        ]
+
+        print("\nTotal unique LPPs being sent to LLM:", len(diff_lines))
+
+        print("\nLPPs being sent to LLM:\n")
+        for lpp in diff_lines:
+            print(lpp)
+
+        return diff_lines
+
+    except Exception as e:
+
+        print("Error reading log file:",e)
+        sys.exit(1)
+
+# prompt
+
+def build_prompt(diff_lines, terminal_diff_report_csv_text, topcell_diff_report_csv_text, sip_lef_generation):
+    layout_diff_report = "\n".join(diff_lines)
+    base_prompt = f"""You are analyzing three reports: a topcell diff report, a terminal diff report, and a layout impact report.
+
+Your task:
+1) Produce exactly one Markdown table with exactly these columns, in this order:
+   CAD view | Impact | Reason
+2) Then add a section titled exactly:
+   Difference summary
+   and include bullets only.
+
+Rules for the table:
+- Use library-level assessment only.
+- Do not include any cell names.
+- Include exactly these CAD views as rows, in this exact order:
+  GDS
+  CDL
+  LEF
+  Liberty
+  Verilog
+  SIP LEF
+- Set Impact to Yes if the reports show any relevant layout layer difference or terminal addition/removal affecting that view.
+- Set Impact to No only if the reports provide no evidence that the view is affected.
+- In Reason, cite the exact layers and/or exact terminal names from the reports that justify the decision.
+- If Impact is No, the Reason must be short and explicit, using only the minimal no-change statement needed, such as:
+  - "No terminals added or removed"
+  - "No cells added or removed"
+  - "No terminals added or removed; no cells added or removed"
+  Use only the statements supported by the reports.
+- Use the report data exactly as provided; do not infer unsupported changes.
+- Topcell changes affect:
+  - CDL because the circuit description changes at the bibliographic/netlist level,
+  - Verilog because the structural netlist can change,
+  - Liberty because the library view can be affected by top-level cell inventory changes.
+- SIP LEF variable:{sip_lef_generation}
+Use SIP LEF variable to determine it's impact.
+If SIP LEF variable is Yes, then write reason: "This is a wirebound package with Nitride as pad layer. Therefore we are forcing SIP to Yes."
+If SIP LEF variable is No, then write reason on your own.
+
+- Strictly follow all the guidlines given below:
+- If Impact is Yes, the Reason column must contain only the cause of impact. Include only the exact reported difference(s) that justify the impact
+- Treat layer names and layer purposes separately:
+  - Layer names are the actual layers, for example: M1, M2, M3.
+  - Layer purposes are the purposes on those layers, for example: drawing, pin, lvsres, HSSOI, NET1V, res3V.
+- When describing layout differences in the Reason column:
+  - Use the format: "layer with purpose <purpose>: <layer list>".
+  - Example: "layer with purpose drawing: M1, M2, M3; layer with purpose pin: M1, M2, M3"
+  - Do not write combined tokens like M1/pin, M2/pin, or M3/pin.
+  - Group all layout differences into one statement, but keep purposes separated from layers.
+  - If multiple purposes are present, list each purpose with its associated layers.
+- When describing terminal changes, group terminal additions/removals by source cell.
+- For multiple terminal cases, use one terminal-change point and use sub-bullets for each source cell.
+- Do not mention any internal assessment process.
+
+Rules for the Difference summary:
+- Use bullets only.
+- Include one bullet for layout differences, grouping all relevant layers and all relevant purposes together.
+- The layout bullet must separate purposes from layers, using wording like:
+  - "layer with purpose ...: ..."
+-  Only include one bullet for terminal additions or removals.
+  - If multiple source cells are affected, use sub-bullets under this bullet.
+- Only include one bullet for topcell differences.
+- If no topcell additions or removals are reported, explicitly say so.
+- Keep the summary concise but technical.
+- Do not include cell names anywhere in the table.
+- Do not add any extra commentary, headings, notes, or explanations.
+
+
+Input reports:
+1. Topcell diff report as csv content:
+{topcell_diff_report_csv_text}
+
+2. Terminal diff report as csv content:
+{terminal_diff_report_csv_text}
+
+3. Layout impact report:
+{layout_diff_report}
+
+
+Output requirements:
+- Respond in the same language as the user prompt.
+- Output only the requested Markdown table and the "Difference summary" section.
+- Preserve the exact row order required for the table.
+- If a report contains no changes, explicitly state that in the relevant Reason or bullet."""
+
+    return base_prompt
+
+def save_markdown_table_as_csv(content):
+
+    rows = []
+
+    for line in content.splitlines():
+
+        line = line.strip()
+
+        if not line.startswith("|"):
+            continue
+
+        if set(
+            line.replace("|", "").strip()
+        ) == {"-"}:
+            continue
+
+        parts = [
+
+            p.strip()
+
+            for p in line.split("|")
+
+            if p.strip()
+        ]
+
+        if parts:
+            rows.append(parts)
+
+    if not rows:
+
+        print("\nNo table detected in response.")
+        return
+
+    output_file = output_dir / "impacted_view_report.csv"
+
+    with open(output_file, "w", newline="", encoding="utf-8") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerows(rows)
+
+    print("\nSaved LLM response to:", output_file)
+
+
+def save_readable_html_report(content, liberty_verilog_flag):
+    html_file = output_dir / "html_readable_llm_report.html"
+    lines = content.splitlines()
+    table_rows = []
+    summary_lines = []
+
+    in_table = False
+    in_summary = False
+
+    for line in lines:
+        stripped = line.strip()
+
+        # Capture header row
+        if stripped.startswith("| CAD view"):
+            in_table = True
+            parts = [
+                p.strip()
+                for p in stripped.split("|")
+                if p.strip()
+            ]
+            table_rows.append(parts)
+            continue
+
+        # Skip separator
+        if in_table and stripped.startswith("|---"):
+            continue
+
+        # Capture table rows
+        if in_table and stripped.startswith("|"):
+            parts = [
+                p.strip()
+                for p in stripped.split("|")
+                if p.strip()
+            ]
+            table_rows.append(parts)
+            continue
+
+        # Detect summary
+        if "Difference summary" in stripped:
+            in_table = False
+            in_summary = True
+            continue
+
+        if in_summary and stripped:
+            summary_lines.append(stripped)
+
+    # Build HTML table
+    table_html = ""
+    for i, row in enumerate(table_rows):
+        if i == 0:
+            table_html += "<tr>\n"
+            for col in row:
+                table_html += f"<th>{html.escape(col)}</th>\n"
+            table_html += "</tr>\n"
+        else:
+            table_html += "<tr>\n"
+            for col in row:
+                table_html += f"<td>{html.escape(col)}</td>\n"
+            table_html += "</tr>\n"
+
+    summary_html = ""
+    for line in summary_lines:
+        if line.startswith("-"):
+            item = line[1:].strip()
+        else:
+            item = line.strip()
+
+        item = html.escape(item)
+        summary_html += f"<li>{item}</li>\n"
+
+    if liberty_verilog_flag == 1:
+        generation_msg = "Generation is not triggered. Out of Scope."
+    else:
+        generation_msg = "Generation is triggered."
+
+    html_content = f"""
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Impacted View Report</title>
+
+<style>
+body {{
+    font-family: Arial, Helvetica, sans-serif;
+    margin: 25px;
+    position: relative;
+    min-height: 100vh;
+    padding-bottom: 60px;
+}}
+
+table {{
+    border-collapse: collapse;
+    width: 100%;
+    table-layout: fixed;
+}}
+
+th, td {{
+    border: 1px solid #444;
+    padding: 8px;
+    text-align: left;
+    vertical-align: top;
+    word-wrap: break-word;
+}}
+
+th {{
+    background-color: #e6e6e6;
+    font-weight: bold;
+}}
+
+.generation-status {{
+    position: fixed;
+    left: 50%;
+    bottom: 20px;
+    transform: translateX(-50%);
+    color: red;
+    font-weight: bold;
+    text-align: center;
+    font-size: 18px;
+    background: white;
+    padding: 6px 12px;
+}}
+</style>
+
+</head>
+
+<body>
+
+<h2>Impacted View Report</h2>
+
+<table>
+{table_html}
+</table>
+
+<h3>Difference summary</h3>
+
+<ul>
+{summary_html}
+</ul>
+
+<div class="generation-status">
+    {html.escape(generation_msg)}
+</div>
+
+</body>
+</html>
+"""
+
+    with open(html_file, "w", encoding="utf-8") as f:
+        f.write(html_content)
+
+    print("HTML report:", html_file)
+    
+    
+    
+
+
+
+def generate_token_and_call_api(api_key, client_app_name, prompt):
+    service_name = "chat"
+    url = ("https://api-ai-bridge.st.com/chatgpt/api/client-apps")
+
+    timestamp = int(time.time())
+    nonce = random.randint(100000,999999)
+    data = (f"{client_app_name}_"f"{service_name}_"f"{api_key}_"f"{timestamp}_"f"{nonce}")
+    hash_object = hashlib.sha1(data.encode())
+    token = hash_object.hexdigest()
+
+    request_body = {
+
+        "version": 1,
+        "clientAppName": client_app_name,
+        "service": service_name,
+        "timestamp": timestamp,
+
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+
+        "temperature": 1,
+        "persona": "alfred_for_api",
+
+        
+        "responseFormat": "text"
+    }
+
+    try:
+
+        response = requests.post(
+
+            url,
+
+            json=request_body,
+
+            headers={
+
+                "stchatgpt-auth-token":
+                    token,
+
+                "stchatgpt-auth-nonce":
+                    str(nonce)
+
+            },
+
+            verify=False,
+
+            timeout=180
+        )
+
+        response.raise_for_status()
+        response_json = response.json()
+        content = response_json.get("completion", "")
+
+        
+        # Retry once again, if empty response from LLM.
+        if not content:
+
+            print("\nLLM returned empty response.")
+            print("Retrying once again...\n")
+            time.sleep(2)
+            
+            timestamp = int(time.time())
+            nonce = random.randint(100000,999999)
+            data = (f"{client_app_name}_"f"{service_name}_"f"{api_key}_"f"{timestamp}_"f"{nonce}")
+            hash_object = hashlib.sha1(data.encode())
+            token = hash_object.hexdigest()
+
+            response = requests.post(
+                url,
+                json=request_body,
+                headers={
+                    "stchatgpt-auth-token": token,
+                    "stchatgpt-auth-nonce": str(nonce)
+                },
+                verify=False,
+                timeout=180
+            )
+
+            response.raise_for_status()
+            response_json = response.json()
+
+            content = response_json.get("completion", "")
+
+            if not content:
+                print("\nLLM still returned empty response.")
+
+                print(response_json)
+
+                return
+
+        print("\nResponse length:",len(content))
+        #print(content)
+        save_markdown_table_as_csv(content)
+        csv_file_path = Path.cwd() / "Output" / "impacted_view_report.csv"
+        csv_to_text, liberty_verilog_flag = convert_csv_to_text(csv_file_path)
+        print(csv_to_text)
+        print("\nFlag value:", liberty_verilog_flag)
+        #save_readable_html_report(content)
+        save_readable_html_report(content, liberty_verilog_flag)
+
+    except requests.exceptions.RequestException as error:
+
+        if error.response is not None:
+
+            print("\nError:", error.response.text)
+
+        else:
+
+            print("\nError:", error)
+
+
+def move_files_to_intermediate_logs():
+
+    try:
+        cwd = Path.cwd()
+
+        intermediate_dir = cwd / "Intermediate_logs"
+        intermediate_dir.mkdir(parents=True, exist_ok=True)
+
+        diff_dir = cwd / "Diff_Logs"
+
+        # Move Diff_Logs folder
+        if diff_dir.exists():
+
+            dst = intermediate_dir / "Diff_Logs"
+
+            if dst.exists():
+                shutil.rmtree(dst)
+
+            shutil.move(str(diff_dir), str(dst))
+
+        items_to_move = ["cds.lib", "cds.lib.task1", "menus", "nominal", "out.log", "replay1.il", "replay.il", "Summary.txt", "topcell.list", "uk-init.il", "XORLIB", "Cell_Diff", "golden_topcell.list",
+"SETUPLOG_topcell.list", "terminal_diff_report.csv"]
+
+        for item in items_to_move:
+
+            src = cwd / item
+            dst = intermediate_dir / item
+
+            if src.exists():
+
+                if dst.exists():
+
+                    if dst.is_dir():
+                        shutil.rmtree(dst)
+                    else:
+                        dst.unlink()
+
+                shutil.move(str(src), str(dst))
+
+    except Exception as e:
+        print("WARNING while moving files:", e)
+
+
+def read_terminals(file_path: Path) -> set[str]:
+    with file_path.open("r", encoding="utf-8") as f:
+        return {line.strip() for line in f if line.strip()}
+
+
+def find_cell_pairs(input_dir: Path):
+    pairs = []
+    be_files = list(input_dir.glob(f"*{BE_SUFFIX}"))
+
+    for be_file in be_files:
+        cell_name = be_file.name[: -len(BE_SUFFIX)]
+        mat_file = input_dir / f"{cell_name}{MAT10_SUFFIX}"
+        if mat_file.exists():
+            pairs.append((cell_name, be_file, mat_file))
+        else:
+            print(f"WARNING: MAT file not found for cell '{cell_name}': {mat_file}")
+
+    return pairs
+
+
+def compare_terminals(be_file: Path, mat_file: Path):
+    be_terms = read_terminals(be_file)
+    mat_terms = read_terminals(mat_file)
+
+    # Option A:
+    # Added   = present in BE, absent in MAT
+    # Removed = present in MAT, absent in BE
+    added = sorted(be_terms - mat_terms)
+    removed = sorted(mat_terms - be_terms)
+
+    return added, removed
+
+
+def write_csv(rows, output_csv: Path):
+    status_lines = []
+
+    with output_csv.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+
+        # Header
+        writer.writerow([
+            "Cell Name",
+            "Terminals Added",
+            "Terminals Removed"
+        ])
+
+        any_change = False
+
+        for row in rows:
+
+            cell_name = row[0]
+            added = row[1].strip()
+            removed = row[2].strip()
+
+            # Write original row
+            writer.writerow(row)
+
+            # Build status only if something changed
+            if added or removed:
+
+                any_change = True
+
+                parts = []
+
+                if added:
+
+                    added_terms = added.split()
+
+                    if len(added_terms) == 1:
+                        parts.append(
+                            f"{added_terms[0]} terminal is added"
+                        )
+                    else:
+                        parts.append(
+                            f"{', '.join(added_terms)} terminals are added"
+                        )
+
+                if removed:
+
+                    removed_terms = removed.split()
+
+                    if len(removed_terms) == 1:
+                        parts.append(
+                            f"{removed_terms[0]} terminal is removed"
+                        )
+                    else:
+                        parts.append(
+                            f"{', '.join(removed_terms)} terminals are removed"
+                        )
+
+                status_line = (
+                    f"Status: For cell {cell_name} "
+                    + " and ".join(parts)
+                )
+
+                status_lines.append(status_line)
+
+        # Add blank line before status
+        writer.writerow([])
+
+        # Case 2 -> nothing changed in any cell
+        if not any_change:
+
+            writer.writerow(
+                ["Status: No terminals are added or removed"]
+            )
+
+        else:
+
+            for line in status_lines:
+
+                writer.writerow([line])
+
+    #print(f"Report written to: {output_csv.resolve()}")
+
+def parse_lef(lef_path: str):
+    records = []
+
+    macro_name = None
+    pin_name = None
+    in_port = False
+
+    macro_re = re.compile(r'^\s*MACRO\s+(\S+)\s*$')
+    pin_re = re.compile(r'^\s*PIN\s+(\S+)\s*$')
+    port_re = re.compile(r'^\s*PORT\s*$')
+    layer_re = re.compile(r'^\s*LAYER\s+(\S+)\s*;')
+    end_re = re.compile(r'^\s*END\s+(\S+)\s*$')
+    end_port_re = re.compile(r'^\s*END\s*$')
+
+    with open(lef_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.rstrip()
+
+            m = macro_re.match(line)
+            if m:
+                macro_name = m.group(1)
+                pin_name = None
+                in_port = False
+                continue
+
+            m = pin_re.match(line)
+            if m:
+                pin_name = m.group(1)
+                in_port = False
+                continue
+
+            if port_re.match(line):
+                in_port = True
+                continue
+
+            if in_port:
+                m = layer_re.match(line)
+                if m and macro_name and pin_name:
+                    records.append((macro_name, pin_name, m.group(1)))
+                    continue
+
+                if end_port_re.match(line):
+                    in_port = False
+                    continue
+
+            m = end_re.match(line)
+            if m:
+                end_name = m.group(1)
+
+                if pin_name and end_name == pin_name:
+                    pin_name = None
+                    in_port = False
+                    continue
+
+                if macro_name and end_name == macro_name:
+                    macro_name = None
+                    pin_name = None
+                    in_port = False
+                    continue
+
+    # Uniquify + sort
+    unique_records = sorted(set(records))
+    return unique_records
+
+
+def write_csv_sip(records, out_csv, header=True):
+    with open(out_csv, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        if header:
+            writer.writerow(["cell_name", "pin_name", "port_layer"])
+        writer.writerows(records)
+
+
+def _pin_layers_from_report_log(report_log):
+    """
+    Collect every layer that appears in report.log with the "pin" purpose.
+
+    Matches lines of the form:
+        difference on lpp:("C5" "pin")
+    Returns a set of lowercased layer names.
+    """
+    pin_layers = set()
+    lpp_re = re.compile(r'lpp\s*:\s*\(\s*"([^"]+)"\s+"([^"]+)"\s*\)')
+
+    with open(report_log, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            m = lpp_re.search(line)
+            if m and m.group(2).strip().lower() == "pin":
+                pin_layers.add(m.group(1).strip().lower())
+
+    return pin_layers
+
+
+def check_sip_lef():
+    """
+    Returns "Yes" or "No".
+
+    "No"  -> SIP LEF file missing, or no qualifying port layer found
+    "Yes" -> port layers include nitride, or one of them appears in
+             report.log with the "pin" purpose
+    """
+    lef_path = (
+        Path(UPT_BASE)
+        / product_name
+        / mat10_version
+        / "SIP"
+        / "physical"
+        / f"{libname}.lef"
+    )
+
+    if not lef_path.is_file():
+        return "No"
+
+    records = parse_lef(str(lef_path))
+
+    cwd = Path.cwd()
+    dump_file = cwd / SIP_LEF_DUMP
+    write_csv_sip(records, str(dump_file), header=False)
+
+    # Unique third-column values, first-seen order preserved
+    port_layers = []
+    for _cell, _pin, layer in records:
+        if layer not in port_layers:
+            port_layers.append(layer)
+
+    if not port_layers:
+        return "No"
+
+    if any(layer.lower() == "nitride" for layer in port_layers):
+        return "Yes"
+
+    report_log = cwd / "Output" / "report.log"
+    if not report_log.is_file():
+        return "No"
+
+    pin_layers = _pin_layers_from_report_log(report_log)
+
+    for layer in port_layers:
+        if layer.lower() in pin_layers:
+            return "Yes"
+
+    return "No"
+
+
+
+
+
+def move_terminal_logs_to_intermediate():
+
+    TERMINAL_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    for pattern in [f"*{BE_SUFFIX}", f"*{MAT10_SUFFIX}"]:
+
+        for file_path in Path.cwd().glob(pattern):
+
+            destination = TERMINAL_LOG_DIR / file_path.name
+
+            if destination.exists():
+                destination.unlink()
+
+            shutil.move(str(file_path), str(destination))
+
+
+def pin_checking():
+    pairs = find_cell_pairs(TERMINAL_LOG_DIR)
+
+    if not pairs:
+        print(f"No matching BE/MAT10 file pairs found in: {TERMINAL_LOG_DIR.resolve()}")
+        return
+
+    rows = []
+
+    for cell_name, be_file, mat_file in sorted(pairs):
+        added, removed = compare_terminals(be_file, mat_file)
+
+        rows.append([
+            cell_name,
+            " ".join(added) if added else " ",
+            " ".join(removed) if removed else " "
+        ])
+
+    output_path = TERMINAL_LOG_DIR / OUTPUT_CSV
+    write_csv(rows, output_path)
+
+    #print(f"Terminal report written to: {output_path.resolve()}")
+    print(f"Terminal report written to: Intermediate_logs/Terminal_Logs/terminal_diff_report.csv")
+    print(f"Total cells processed: {len(rows)}")
+
+
+def read_file_text(file_path: Path) -> str:
+    if not file_path.is_file():
+        raise RuntimeError(f"File not found: {file_path}")
+    return file_path.read_text(encoding="utf-8")
+
+
+def open_html_report():
+    html_file_path = output_dir / "html_readable_llm_report.html"
+
+    if not os.path.exists(html_file_path):
+        print("HTML file not found:", html_file_path)
+        return
+
+    try:
+        command = f'/sw/freetools/firefox/92.0/rh70_64/firefox "{html_file_path}" &'
+
+        subprocess.Popen(
+            ["csh", "-c", command],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+
+
+    except Exception as e:
+        print("Failed to open HTML file:", e)
+
+def setup_analyzer_workdir():
+    """
+    Create Analyzer/ in the current location if it does not exist,
+    then change the current working directory to Analyzer/.
+    """
+    base_dir = Path.cwd()
+    analyzer_dir = base_dir / "Analyzer"
+    analyzer_dir.mkdir(parents=True, exist_ok=True)
+    os.chdir(analyzer_dir)
+    
+    
+#---------------------------------Generation extra functions-----------------------------------
+
+def build_cds(libname: str, mat09_cdsoa_oa_path: str):
+    """
+    Build the 3 lines that must be written to cds file:
+      1) SOFTINCLUDE <DKITROOT>/<something>.cdslib
+      2) DEFINE basic <basicLibPath>
+      3) DEFINE <libname> <path to MAT09/CADENCE/CDSOA>
+    """
+    dkitroot = os.environ.get("DKITROOT")
+    if not dkitroot:
+        raise RuntimeError("DKITROOT is not set in the environment.")
+
+    pattern = os.path.join(dkitroot, "*.cdslib")
+    matches = glob.glob(pattern)
+
+    if not matches:
+        raise RuntimeError(f"No .cdslib file found under DKITROOT: {pattern}")
+
+    cdslib_path = matches[0]
+    soft_line = f"SOFTINCLUDE {cdslib_path}\n"
+
+    basic_lib_path = get_basic_lib_path()
+    if not basic_lib_path:
+        raise RuntimeError("Could not determine virtuoso path (basicLibPath).")
+    basic_line = f"DEFINE basic {basic_lib_path}\n"
+
+    third_line = f"DEFINE {libname} {mat09_cdsoa_oa_path}\n"
+
+    return [soft_line, basic_line, third_line]
+
+
+
+
+def overwrite_cds(cds_lib_path: str, libname: str, mat09_cdsoa_oa_path: str):
+    """Completely overwrite the file (create it if it does not exist)."""
+
+    lines = build_cds(libname, mat09_cdsoa_oa_path)
+
+    dir_name = os.path.dirname(cds_lib_path)
+    if dir_name:
+        os.makedirs(dir_name, exist_ok=True)
+
+    with open(cds_lib_path, "w") as f:
+        f.writelines(lines)
+
+
+
+def methodology_to_choice(methodology: str) -> str:
+    if methodology == "PERIPHERY":
+        print("metodology: ",methodology)
+        return "2"
+    elif methodology == "MACRO":
+        print("methodology: ",methodology)
+        return "3"
+    else:
+        raise ValueError(f"Unsupported methodology: {methodology}")
+        
+        
+        
+def DIRECTORY_STRUCTURE_CREATION(choice: str):
+    script_path = "/work/LIPAM/DISK/SCRIPTS/Directory_Structure"
+
+    proc = subprocess.run(
+        [script_path],
+        input=f"{choice}\n",
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE
+    )
+
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "Directory_Structure failed\n"
+            f"stdout:\n{proc.stdout}\n"
+            f"stderr:\n{proc.stderr}"
+        )
+
+    print(proc.stdout)
+    
+    
+def create_upt_symlink_structure(product_name: str, be_version: str, mat10_version: str):
+    """
+    Inside ./<product_name>/ create:
+      - BE_UPT/<product_name>@<be_version> with symlinks to source BE version files
+      - MAT10_UPT/<product_name>@<mat10_version> with symlinks to source MAT10 version files
+
+    If the expected BE/MAT10 source directory is missing, ask the user to provide the corresponding database area path.
+    """
+    base_dir = Path.cwd()
+
+    be_upt_dir = base_dir / "BE_UPT"
+    mat10_upt_dir = base_dir / "MAT10_UPT"
+
+    be_target_dir = be_upt_dir / f"{product_name}@{be_version}"
+    mat10_target_dir = mat10_upt_dir / f"{product_name}@{mat10_version}"
+
+    default_be_source_dir = Path(f"/work/uptpluscache/areas/trd/{product_name}/{be_version}")
+    default_mat10_source_dir = Path(f"/work/uptpluscache/areas/trd/{product_name}/{mat10_version}")
+
+    # Create target directories
+    be_target_dir.mkdir(parents=True, exist_ok=True)
+    mat10_target_dir.mkdir(parents=True, exist_ok=True)
+
+    # Resolve BE source directory
+    be_source_dir = default_be_source_dir
+    if not be_source_dir.is_dir():
+        user_path = input(
+            f"BE database area not found at '{default_be_source_dir}'. "
+            f"Please provide the BE database area path in format (e.g. /work/uptpluscache/areas/trd/<product_name>/<be_version> ) : "
+        ).strip()
+        be_source_dir = Path(user_path)
+        if not be_source_dir.is_dir():
+            raise FileNotFoundError(f"BE database area not found: {be_source_dir}")
+
+    # Resolve MAT10 source directory
+    mat10_source_dir = default_mat10_source_dir
+    if not mat10_source_dir.is_dir():
+        user_path = input(
+            f"MAT10 database area not found at '{default_mat10_source_dir}'. "
+            f"Please provide the MAT10 database area path in format (e.g. /work/uptpluscache/areas/trd/<product_name>/<reference_MAT10_version> ) : "
+        ).strip()
+        mat10_source_dir = Path(user_path)
+        if not mat10_source_dir.is_dir():
+            raise FileNotFoundError(f"MAT10 database area not found: {mat10_source_dir}")
+
+    # Create symlinks for BE
+    create_symlinks_from_source(be_source_dir, be_target_dir)
+
+    # Create symlinks for MAT10
+    create_symlinks_from_source(mat10_source_dir, mat10_target_dir)
+
+    print(f"Created BE_UPT structure at: {be_target_dir}")
+    print(f"Created MAT10_UPT structure at: {mat10_target_dir}")
+
+
+def create_symlinks_from_source(source_dir: Path, target_dir: Path):
+    if not source_dir.is_dir():
+        raise FileNotFoundError(f"Source directory not found: {source_dir}")
+
+    for item in source_dir.iterdir():
+        dst = target_dir / item.name
+
+        if dst.exists() or dst.is_symlink():
+            if dst.is_dir() and not dst.is_symlink():
+                shutil.rmtree(dst)
+            else:
+                dst.unlink()
+
+        dst.symlink_to(item.resolve())
+        
+
+
+
+def MAT09_CREATION(product_name: str, be_version: str, mat10_version: str, process: str, leaf_cells_present: bool, leaf_be_file: Path):
+    """
+    Inside ./<product_name>/SAND_MAT10/MAT09:
+      - if process contains "CMOSP28" or "P28":
+          check these three possible cadence sources in order and use the first directory found:
+            1) BE_UPT/<product_name>@<be_version>/CADENCE/CDSOA
+            2) BE_UPT/<product_name>@<be_version>/OA
+            3) BE_UPT/<product_name>@<be_version>/CDS
+        destination remains: SAND_MAT10/MAT09/OA
+
+      - otherwise:
+          create symlink to BE_UPT/<product_name>@<be_version>/CADENCE/CDSOA
+          destination: SAND_MAT10/MAT09/CADENCE/CDSOA
+
+      - create symlink to behaviour, libs, packaging from MAT10_UPT/<product_name>@<mat10_version>
+      - copy INTERFACE from MAT10_UPT/<product_name>@<mat10_version>
+    """
+    base_dir = Path.cwd()
+
+    sand_mat10_dir = base_dir / "SAND_MAT10"
+    mat09_dir = sand_mat10_dir / "MAT09"
+
+    be_root = base_dir / "BE_UPT" / f"{product_name}@{be_version}"
+    mat10_root = base_dir / "MAT10_UPT" / f"{product_name}@{mat10_version}"
+
+    mat09_dir.mkdir(parents=True, exist_ok=True)
+
+    # Choose CADENCE paths based on process
+    if "CMOSP28" in process or "P28" in process:
+        possible_cadence_sources = [
+            be_root / "CADENCE" / "CDSOA",
+            be_root / "OA",
+            be_root / "CDS",
+        ]
+
+        cadence_src = None
+        for src in possible_cadence_sources:
+            if src.is_dir():
+                cadence_src = src
+                break
+
+        if cadence_src is None:
+            raise FileNotFoundError(
+                "None of the expected cadence source directories were found for P28/CMOSP28: "
+                + ", ".join(str(p) for p in possible_cadence_sources)
+            )
+
+        cadence_dst = mat09_dir / "OA"
+
+    else:
+        cadence_src = be_root / "CADENCE" / "CDSOA"
+        if not cadence_src.is_dir():
+            raise FileNotFoundError(f"CADENCE source directory not found: {cadence_src}")
+
+        cadence_dst = mat09_dir / "CADENCE" / "CDSOA"
+
+    # Sources from MAT10
+    behaviour_src = mat10_root / "behaviour"
+    libs_src = mat10_root / "libs"
+    packaging_src = mat10_root / "packaging"
+    interface_src = mat10_root / "INTERFACE"
+
+    # Destinations
+    behaviour_dst = mat09_dir / "behaviour"
+    libs_dst = mat09_dir / "libs"
+    packaging_dst = mat09_dir / "packaging"
+    interface_dst = mat09_dir / "INTERFACE"
+
+    # Create symlinks
+    create_symlink_path(cadence_src, cadence_dst)
+    create_symlink_path(behaviour_src, behaviour_dst)
+    create_symlink_path(libs_src, libs_dst)
+    create_symlink_path(packaging_src, packaging_dst)
+
+    # Copy INTERFACE only
+    copy_tree(interface_src, interface_dst)
+    
+    # Update leafcell.list only if leaf cells were generated
+    if leaf_cells_present and leaf_be_file is not None:
+        leafcell_file = interface_dst / "leafcell.list"
+        leafcell_file.parent.chmod(0o777)
+        leafcell_file.chmod(0o666)
+        leafcell_file.write_text(Path(leaf_be_file).read_text())
+
+    print(f"MAT09 setup completed at: {mat09_dir}")
+
+
+    
+def create_symlink_path(src: Path, dst: Path):
+    """
+    Create a symlink at dst pointing to src.
+    If dst exists, remove it first.
+    """
+    if not src.exists():
+        print (f"During MAT09 directory creation, the Softlink for this directory can't be created because Source path not found at MAT10_UPT: {src}")
+        return
+
+    if dst.exists() or dst.is_symlink():
+        if dst.is_dir() and not dst.is_symlink():
+            shutil.rmtree(dst)
+        else:
+            dst.unlink()
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.symlink_to(src.resolve())    
+    
+    
+def copy_tree(src: Path, dst: Path):
+    if not src.is_dir():
+        print (f"During MAT09 directory creation, Source directory not found at MAT10_UPT: {src}")
+        return
+
+    if dst.exists():
+        if dst.is_dir():
+            shutil.rmtree(dst)
+        else:
+            dst.unlink()
+
+    shutil.copytree(src, dst)
+
+
+
+
+
+
+
+def write_dk_fixedCell_scripts():
+    csh_script = r'''#!/bin/csh -f
+
+if($1 == '' || $1 == '-h' || $1 == '-help') then
+echo "Format :: script_name <library_name>"
+exit;
+endif
+
+if (-f "lib_name_file") then
+   rm lib_name_file;
+endif
+
+if (-f "wrapper.il") then
+   rm -rf wrapper.il
+endif
+
+if (!(-f "cds.lib")) then
+   echo "ERROR :: cds.lib file is not found."
+   break;
+endif
+
+set lib_name=$1;
+
+echo "$1" > lib_name_file
+
+echo "$path" > dk.log
+
+perl ./internal_script.pl
+
+if(-f "wrapper.il") then
+bsub -q reg -I virtuoso -nograph -replay wrapper.il
+
+[ -s list_of_fixed_cells ] && echo " " || echo "INFO :: list_of_fixed_cell file is empty."
+
+rm -rf dk.log lib_name_file
+
+mv list_of_fixed_cells cell.map
+
+echo "INFO :: cell.map file is created."
+
+[ -s cell.map ] && echo " " || echo "INFO :: cell.map file is empty."
+
+echo " STATUS :: Done.!"
+endif
+'''
+
+    perl_script = r'''#!/usr/bin/perl
+
+open my $lib, '<', "lib_name_file" or die $!;
+my @lib_name = <$lib>;
+$lib_name[0] =~ s/^\s+|\s+$//g;
+
+open my $dk, '<', "dk.log" or die $!;
+my @dk_a = <$dk>;
+my $size = @dk_a;
+
+$err = 0;
+$c_err = 1;
+
+if (!(index($dk_a[0], "DK") != -1)) { print "ERROR :: DK is not Sourced \n"; $err = $err + 1; }
+if (!(index($dk_a[0], "cadence/ic") != -1)) { print "ERROR :: Virtuoso is not Sourced\n"; $err = $err + 1; }
+
+$cds_lib = "cds.lib";
+open my $cds, '<', $cds_lib or die $!;
+@cds_array = <$cds>;
+$cds_size = @cds_array;
+
+for ($i = 0; $i < $cds_size; $i++) {
+    $tp = $cds_array[$i];
+    if (($tp =~ /(DEFINE)+\s*($lib_name[0]\s)/)) {
+        $c_err = 0;
+    }
+}
+
+if ($c_err > 0) {
+    print "ERROR :: DEFINE statement of \"$lib_name[0]\" is not found in cds.lib file \n";
+    exit;
+}
+if ($err > 0) {
+    print "STATUS :: NOT OKAY\n";
+    exit;
+}
+
+system("touch wrapper.il");
+open(my $wr, ">", "wrapper.il") or die $!;
+print $wr "load(\"/work/LIPAM/AUTOMATION/CDSOA/dk_fixedCell_cellmap_gen/check_fixed_cell.il\")\n";
+print $wr "return_fixed_cell(\"$lib_name[0]\",\"layout\")\n";
+print $wr "println(\"Done\")\n";
+close($wr);
+'''
+
+    csh_path = Path.cwd() / "dk_fixedCell_cellmap_gen"
+    perl_path = Path.cwd() / "internal_script.pl"
+
+    csh_path.write_text(csh_script, encoding="utf-8")
+    perl_path.write_text(perl_script, encoding="utf-8")
+
+    csh_path.chmod(0o755)
+    perl_path.chmod(0o755)
+
+    return csh_path
+    
+    
+    
+def write_create_libderiv_options_file_script():
+    perl_script = r'''#!/usr/bin/perl
+
+if (scalar(@ARGV) > 0)
+{
+    if (($ARGV[0] eq "h") || ($ARGV[0] eq "help") || ($ARGV[0] eq "-h") || ($ARGV[0] eq "-help") || ($ARGV[0] eq "--h")) {
+        print "
+#### Run the Script as --->
+#
+#   create_libderiv_options_file.pl   (for no cell.map file)
+#
+#                OR
+#
+#   create_libderiv_options_file.pl  <Path of cell.map file>
+#
+#   To create a cell.map file run the script:
+#   /work/LIPAM/AUTOMATION/CDSOA/dk_fixedCell_cellmap_gen/dk_fixedCell_cellmap_gen.sh
+####\n\n";
+        exit;
+    }
+    else {
+        $map = $ARGV[0];
+        $map_flag = 1;
+    }
+}
+else {
+    $map_flag = 0;
+}
+
+if ($map_flag == 0) {
+    print "## Note: No cell.map file provided!!";
+}
+
+$path = "generate_postproces_il.pl";
+$output = "custom_strmout.opt";
+
+if ($map_flag == 1) {
+    $abs_map = `fname $ARGV[0]`;
+    chomp $abs_map;
+    if (!(-e "$abs_map")) {
+        print "###Error: the file $map does not exist. please check and run the script again\n";
+        exit;
+    }
+}
+
+open(OUT, ">$output") || die "cannot open $output" ;
+
+system("perl ./generate_postproces_il.pl");
+
+$cwd = `pwd`;
+chomp $cwd;
+$file_path = "$cwd/postproces.il";
+
+if (-e "$file_path") {
+    print OUT "flattenPcells  \"false\"\nuserSkillFile  \"$file_path\"\n";
+}
+else {
+    print "file not created in the path: $file_path Please check...\n";
+    exit;
+}
+
+if ($map_flag == 1) {
+    print OUT "cellMap        \"$abs_map\"\n";
+}
+
+close OUT;
+
+print "
+## File generated: $output
+## Use the following option in the derivation_setup/libderiv command -add_strmout_file
+";
+'''
+
+    py_script = r'''#!/usr/bin/perl
+
+open(FILE, ">postproces.il") || die "cannot write to postproces.il\n";
+
+$date = `date | awk '{print \$6\$2\$3\$4}' | sed s'/://g'`;
+chomp $date;
+
+print FILE "procedure(poParamCellNameMap(name ID)
+   prog( ( newName )
+        count =random(1234567890)
+        postfix=\"$date\"
+        sprintf( newName \"%s_%s_%L\" name postfix count)
+        return( newName )
+   );prog
+);procedure
+";
+close FILE;
+'''
+
+    script1_path = Path.cwd() / "create_libderiv_options_file.pl"
+    script2_path = Path.cwd() / "generate_postproces_il.pl"
+
+    script1_path.write_text(perl_script, encoding="utf-8")
+    script2_path.write_text(py_script, encoding="utf-8")
+
+    script1_path.chmod(0o755)
+    script2_path.chmod(0o755)
+
+    return script1_path
+
+
+
+def derivation_setup(
+    mat09_dir: Path,
+    methodology: str,
+    be_version: str,
+    custom_strmout_opt: Path,
+    user_values: dict,
+    library_values: dict,
+):
+    """
+    Run derivation-setup with:
+      - optional -refLib arguments
+      - optional derivation_setup_extra_options
+    """
+
+    be_version_subpart = be_version.split("-", 1)[0].strip()
+
+    cmd = [
+        "bsub",
+        "-q", "long",
+        "-Ip",
+        "derivation-setup",
+        "-libPath", str(mat09_dir),
+        "-blockgroup", methodology,
+        "-libVersion", be_version_subpart,
+        "-saveargfile", "SetupDB/setup.rls",
+        "-add_strmout_file", str(custom_strmout_opt),
+    ]
+
+    # Add -refLib args dynamically if reflib tags are present
+    reflib_count = user_values.get("reflib_count", 0)
+    if reflib_count > 0:
+        for idx in range(1, reflib_count + 1):
+            reflib = user_values.get(f"reflib{idx}")
+            version = user_values.get(f"version{idx}")
+            library = library_values.get(f"library{idx}")
+
+            if not reflib or not version or not library:
+                raise ValueError(f"Missing reflib{idx}, version{idx}, or library{idx}")
+
+            ref_path = Path(UPT_BASE) / reflib / version
+            ref_lib_arg = f"{library}:{ref_path}/"
+            cmd.extend(["-refLib", ref_lib_arg])
+
+    # Add optional extra derivation setup option
+    extra_opt = user_values.get("derivation_setup_extra_options", "").strip()
+    if extra_opt:
+        parts = extra_opt.split()
+        parts[0] = f"-{parts[0]}"
+        cmd.extend(parts)
+
+
+    print("\nRunning derivation-setup command:")
+    print(" ".join(cmd))
+
+    result = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            "derivation-setup failed\n"
+            f"stdout:\n{result.stdout}\n"
+            f"stderr:\n{result.stderr}"
+        )
+
+    print(result.stdout)
+       
+
+
+
+
+def read_targeted_tasks(tab_file_path: Path = Path("targeted_tasks.tab")):
+    """
+    Read targeted_tasks.tab (created by derivation-setup) and return
+    a list of view/task names. Skips the 'name' header and blank lines.
+    """
+    if not tab_file_path.is_file():
+        raise FileNotFoundError(f"targeted_tasks.tab not found: {tab_file_path}")
+
+    views = []
+    with tab_file_path.open("r", encoding="utf-8") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.lower() == "name":   # skip header
+                continue
+            views.append(line)
+
+    if not views:
+        raise RuntimeError(f"No views found in {tab_file_path}")
+
+    return views
+
+
+
+
+
+
+
+
+
+
+######################################################################Agentic flow starts here#####################################################################################################
+
+def generate_token_for_agent(api_key, client_app_name, prompt):
+    service_name = "chat"
+    url = ("https://api-ai-bridge.st.com/chatgpt/api/client-apps")
+
+    timestamp = int(time.time())
+    nonce = random.randint(100000,999999)
+    data = (f"{client_app_name}_"f"{service_name}_"f"{api_key}_"f"{timestamp}_"f"{nonce}")
+    hash_object = hashlib.sha1(data.encode())
+    token = hash_object.hexdigest()
+
+    request_body = {
+
+        "version": 1,
+        "clientAppName": client_app_name,
+        "service": service_name,
+        "timestamp": timestamp,
+
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+
+        "temperature": 0.1,
+        "persona": "alfred_for_api",
+
+        
+        "responseFormat": "json_object"
+    }
+
+    try:
+
+        response = requests.post(
+
+            url,
+
+            json=request_body,
+
+            headers={
+
+                "stchatgpt-auth-token":
+                    token,
+
+                "stchatgpt-auth-nonce":
+                    str(nonce)
+
+            },
+
+            verify=False,
+
+            timeout=180
+        )
+
+        response.raise_for_status()
+        response_json = response.json()
+        content = response_json.get("completion", "")
+
+        
+        # Retry once if empty
+        if not content:
+
+            print("\nLLM returned empty response.")
+            print("Retrying once again...\n")
+            time.sleep(2)
+            
+            timestamp = int(time.time())
+            nonce = random.randint(100000,999999)
+            data = (f"{client_app_name}_"f"{service_name}_"f"{api_key}_"f"{timestamp}_"f"{nonce}")
+            hash_object = hashlib.sha1(data.encode())
+            token = hash_object.hexdigest()
+
+            response = requests.post(
+                url,
+                json=request_body,
+                headers={
+                    "stchatgpt-auth-token": token,
+                    "stchatgpt-auth-nonce": str(nonce)
+                },
+                verify=False,
+                timeout=180
+            )
+
+            response.raise_for_status()
+            response_json = response.json()
+
+            content = response_json.get("completion", "")
+
+            if not content:
+                print("\nLLM still returned empty response.")
+
+                print(response_json)
+
+                return
+
+        print("\nResponse length:",len(content))
+        print(content)
+        return content
+
+    except requests.exceptions.RequestException as error:
+
+        if error.response is not None:
+
+            print("\nError:", error.response.text)
+
+        else:
+
+            print("\nError:", error)
+
+
+
+def convert_csv_to_text(csv_file_path):
+    """
+    Read impacted_view_report.csv
+    and convert only:
+    CAD view, Impact
+    into text format for LLM.
+
+    Also return a flag:
+    - 1 if Liberty or Verilog impact is Yes
+    - 0 if both are No
+    """
+    import csv
+
+    lines = []
+    liberty_verilog_flag = 0
+
+    try:
+        with open(csv_file_path, "r", newline="") as csv_file:
+            reader = csv.DictReader(csv_file)
+
+            for row in reader:
+                cad_view = row["CAD view"].strip()
+                impact = row["Impact"].strip()
+
+                lines.append(f"{cad_view}, {impact}")
+
+                if cad_view in ("Liberty", "Verilog") and impact == "Yes":
+                    liberty_verilog_flag = 1
+
+        csv_to_text = "\n".join(lines)
+
+        #print("\nOutput of CAD_View_Impact_Analyzer script, sent to LLM:\n")
+        #print(csv_to_text)
+
+        return csv_to_text, liberty_verilog_flag
+
+    except Exception as e:
+        print("\nError converting CSV to text:", e)
+        return "", 0
+
+
+
+
+def parse_impacted_sources(csv_to_text):
+    """
+    Deterministic pre-check (no LLM): from the CAD-view/impact text,
+    return the set of impacted sources we care about (GDS, CDL, LEF).
+    Used to decide whether to even call the LLM.
+    """
+    impacted = set()
+    for line in csv_to_text.strip().splitlines():
+        if "," not in line:
+            continue
+        view, impact = (p.strip() for p in line.split(",", 1))
+        view_u = view.upper()
+        impact_u = impact.upper()
+        if view_u in IMPACT_SOURCE_TO_LIST and impact_u == "YES":
+            impacted.add(view_u)
+    return impacted
+
+
+def build_agent_prompt(csv_to_text, available_lists):
+    """
+    Ask the LLM to act as the reasoning layer: read the impact report and
+    decide WHICH view-lists should be intersected. It does NOT compute the
+    intersection itself (Python does that deterministically).
+    """
+    list_names = ", ".join(available_lists)
+    
+    prompt = f"""
+You are an AI agent that decides which library view-lists must be processed
+during IC view generation, based on an Impacted CAD View report.
+
+You are given:
+1. A report of CAD views and whether each is impacted (Yes/No).
+2. A set of named view-lists you may select from: {list_names}
+
+Selection rules (apply STRICTLY):
+- If "GDS" has Impact = Yes  -> select "GDS_VIEWS"
+- If "LEF" has Impact = Yes  -> select "LEF_VIEWS"
+- Ignore every other CAD view in the report.
+- "targeted_views" must ALWAYS be selected.
+- A CAD view with Impact = No selects nothing.
+- Do not invent list names. Only choose from: {list_names}
+
+Output format (STRICT):
+Return ONLY a single valid JSON object, nothing else, no markdown, no commentary:
+{{"selected_lists": ["<name>", "<name>", ...]}}
+
+The list must contain unique names only.
+
+Impacted CAD View report:
+{csv_to_text}
+"""
+    print(prompt)
+    return prompt
+
+
+def parse_agent_decision(response, available_lists):
+    """
+    Robustly parse the LLM JSON decision and validate every name against the
+    whitelist. Returns a clean, deduplicated list of selected list-names.
+    """
+    if not response:
+        raise RuntimeError("LLM returned no response for the selection decision.")
+
+    text = response.strip()
+
+    # Strip accidental markdown fences if the model added them.
+    text = re.sub(r"^```(?:json)?", "", text).strip()
+    text = re.sub(r"```$", "", text).strip()
+
+    # Extract the first {...} block to be resilient to stray prose.
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if not match:
+        raise RuntimeError(f"Could not find JSON object in LLM response:\n{response}")
+
+    try:
+        data = json.loads(match.group(0))
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"Invalid JSON from LLM: {e}\nRaw:\n{response}")
+
+    selected = data.get("selected_lists", [])
+    
+    if not isinstance(selected, list):
+        raise RuntimeError(f"'selected_lists' is not a list:\n{response}")
+        
+    print("Selected: ", selected)
+
+    whitelist = set(available_lists)
+    clean = []
+    seen = set()
+    for name in selected:
+        if not isinstance(name, str):
+            continue
+        name = name.strip()
+        if name in whitelist and name not in seen:
+            seen.add(name)
+            clean.append(name)
+
+    # Guardrail: targeted_views must always be present (rule is deterministic).
+    if "targeted_views" in whitelist and "targeted_views" not in seen:
+        clean.append("targeted_views")
+
+    if not clean:
+        raise RuntimeError(f"LLM selected no valid lists:\n{response}")
+
+    print("Clean: ", clean)
+    return clean
+
+
+
+def compute_common_views(selected_list_names, list_registry, ordering_key="targeted_views"):
+    if not selected_list_names:
+        return []
+
+    targeted_set = set(list_registry[ordering_key])
+
+    combined_views = []
+    seen = set()
+
+    for name in selected_list_names:
+        if name == ordering_key:
+            continue
+        for view in list_registry[name]:
+            if view not in seen and view in targeted_set:
+                seen.add(view)
+                combined_views.append(view)
+
+    return combined_views
+
+
+
+def run_derivation_make(
+    logger,
+    final_views,
+    sand_mat10_dir,
+    product_name_dir,
+    product_name,
+    mat10_version,
+    golden_topcells,
+    libname
+):
+    """
+    Execute derivation-make sequentially.
+
+    New behavior:
+      1. Run all views normally in final_views order.
+      2. If cds_voltus is present, run it last.
+      3. Before running cds_voltus, compare Apache .def.gz files.
+         - if compare returns 1, run cds_voltus
+         - if compare returns 0, skip cds_voltus
+    """
+    if not final_views:
+        print("\nNo views to generate. Skipping derivation-make.")
+        return
+
+    print(f"\nGeneration will run for {len(final_views)} target(s): {final_views}\n")
+
+    skip_cds_voltus = False
+
+    # ------------------------------------------------------------
+    # Preserve order, but move cds_voltus to the end if present
+    # ------------------------------------------------------------
+    ordered_views = [v for v in final_views if v != "cds_voltus"]
+    if "cds_voltus" in final_views:
+        ordered_views.append("cds_voltus")
+
+    # ------------------------------------------------------------
+    # Main generation loop
+    # ------------------------------------------------------------
+    for view in ordered_views:
+
+        # --------------------------------------------------------
+        # Before cds_voltus: compare Apache .def.gz files
+        # --------------------------------------------------------
+        if view == "cds_voltus":
+            if all([sand_mat10_dir, product_name_dir, product_name, mat10_version, golden_topcells, libname]):
+                print("\nComparing Apache .def.gz files before cds_voltus...")
+                compare_result = compare_apache_def_gz_files(
+                    sand_mat10_dir,
+                    product_name_dir,
+                    libname,
+                    product_name,
+                    mat10_version,
+                    golden_topcells
+                )
+
+                if compare_result == 1:
+                    print("\nApache DEF differences found. cds_voltus will be generated.")
+                    skip_cds_voltus = False
+                else:
+                    print("\nNo Apache DEF differences found. cds_voltus will not be generated.")
+                    skip_cds_voltus = True
+            else:
+                print("WARNING: Missing inputs for Apache DEF comparison flow. Skipping compare step.")
+                # Decide behavior here:
+                # If you want to skip cds_voltus when compare cannot run, keep True
+                skip_cds_voltus = True
+
+            if skip_cds_voltus:
+                print("\nSkipping cds_voltus because Apache DEF differences were not found.\n")
+                continue
+
+        start_dt = datetime.now()
+        logger.info(f"[START] derivation-make:{view} | {start_dt.strftime('%Y-%m-%d %H:%M:%S')}")
+
+        t0 = time.perf_counter()
+
+        queue = "reg" if view == "cds_voltus" else "long"
+
+        cmd = [
+            "bsub",
+            "-q", queue,
+            "-Ip",
+            "derivation-make",
+            "-target", view,
+            "-param", "lbf-batch-resource=local",
+        ]
+
+        print(f"Running derivation-make for target: {view}")
+        print("  " + " ".join(cmd))
+
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        t1 = time.perf_counter()
+        end_dt = datetime.now()
+        elapsed_sec = t1 - t0
+        elapsed_min = elapsed_sec / 60.0
+
+        logger.info(
+            f"[END]   derivation-make:{view} | {end_dt.strftime('%Y-%m-%d %H:%M:%S')} | "
+            f"Duration: {elapsed_sec:.2f} seconds | "
+            f"Duration: {elapsed_min:.2f} minutes"
+        )
+        logger.info("-" * 80)
+
+        if result.returncode != 0:
+            print(
+                f"derivation-make failed for target '{view}'\n"
+                f"stdout:\n{result.stdout}\n"
+                f"stderr:\n{result.stderr}"
+            )
+            logger.info(f"[ERROR] derivation-make:{view} failed")
+            logger.info(result.stdout)
+            logger.info(result.stderr)
+            print(f"Continuing to next target after failure in: {view}\n")
+            continue
+
+        print(result.stdout)
+        print(f"Execution complete for target: {view}. Moving to next.\n")
+
+    print("All derivation-make targets processed.")
+
+
+
+def Impacted_CAD_View_Generation(logger, csv_file_path, api_key, client_app_name, targeted_views, sand_mat10_dir, product_name_dir, product_name, mat10_version, golden_topcells, libname,):
+    """
+    AI-agent flow:
+      1. (Python) Read impact report -> deterministic pre-check.
+      2. If nothing impacted -> stop, do NOT call the LLM.
+      3. (LLM) Decide which view-lists to intersect.
+      4. (Python) Validate decision, compute intersection, run derivation-make.
+    """
+    print("\n" + "=" * 70)
+    print("AI AGENT: View-generation decision flow")
+    print("=" * 70)
+
+    # ---- Step 1: read report into text (input to the agent) ----
+    csv_to_text, liberty_verilog_flag = convert_csv_to_text(csv_file_path)
+    if not csv_to_text:
+        print("\nImpact report is empty or unreadable. Generation is not triggered.")
+        return
+
+    # ---- Step 2: deterministic gate (no LLM call if nothing is impacted) ----
+    impacted_sources = parse_impacted_sources(csv_to_text)
+    if not impacted_sources:
+        print("\nReason: None of GDS, CDL, or LEF are Impacted.")
+        print("\nGeneration is not triggered.")
+        return
+
+    print(f"\nImpacted sources detected: "
+          f"{sorted(impacted_sources)}")
+
+    # ---- Build the list registry available to the agent for THIS run ----
+    available_registry = dict(LIST_REGISTRY)
+    available_registry["targeted_views"] = targeted_views
+    #print("available_registry: ", available_registry)
+    available_lists = list(available_registry.keys())
+    print("available_lists: ", available_lists)
+    print("csv to text:\n", csv_to_text)
+    
+
+    # ---- Step 3: LLM decides which lists to use (reasoning layer) ----
+    print("\nAgent decides which view-lists to intersect...")
+    prompt = build_agent_prompt(csv_to_text, available_lists)
+    response = generate_token_for_agent(api_key, client_app_name, prompt)
+
+    selected_list_names = parse_agent_decision(response, available_lists)
+    print(f"\nAgent selected lists: {selected_list_names}")
+
+    # ---- Safety cross-check: compare LLM choice with Python's own derivation ----
+    expected = {IMPACT_SOURCE_TO_LIST[s] for s in impacted_sources}
+    expected.add("targeted_views")
+    if set(selected_list_names) != expected:
+        print("\nWARNING: LLM selection differs from deterministic expectation.")
+        print(f"  LLM      : {sorted(selected_list_names)}")
+        print(f"  Expected : {sorted(expected)}")
+        print("  Falling back to deterministic selection for safety.")
+        selected_list_names = list(expected)
+
+    # ---- Step 4: Python computes the intersection (deterministic) ----
+    
+    print("\n\navailable  registry: ", available_registry)
+    print("\n\nselected  list  names: ", selected_list_names)
+    final_views = compute_common_views(selected_list_names, available_registry)
+    print(f"\nFinal view list for derivation-make: {final_views}")
+
+    if not final_views:
+        print("\nIntersection is empty. Nothing to generate. Generation is not triggered.")
+        return
+
+    # ---- Step 5: run the generation commands one by one ----
+    run_derivation_make(
+    logger,
+    final_views,
+    sand_mat10_dir,
+    product_name_dir,
+    product_name,
+    mat10_version,
+    golden_topcells,
+    libname)
+
+
+
+def move_directories_into_export(libname: str):
+    """
+    Move all directories from:
+      SAND_MAT10/WorkDB/setup/MAT10_<libname>/
+    to:
+      SAND_MAT10/SANDBOX/EXPORT/
+    except:
+      behaviour, INTERFACE, libs, MENTOR, ccs, electrical, test
+    """
+    sand_mat10_dir = Path.cwd()
+
+    source_dir = sand_mat10_dir / "WorkDB" / "setup" / f"MAT10_{libname}"
+    dest_dir = sand_mat10_dir / "SANDBOX" / "EXPORT"
+
+    if not source_dir.is_dir():
+        raise FileNotFoundError(f"Source directory not found: {source_dir}")
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    exclude_dirs = {"behaviour", "INTERFACE", "libs", "MENTOR", "ccs", "electrical", "test"}
+
+    moved_dirs = []
+
+    for item in source_dir.iterdir():
+        if item.is_dir() and item.name not in exclude_dirs:
+            src = item
+            dst = dest_dir / item.name
+
+            if dst.exists():
+                if dst.is_dir() and not dst.is_symlink():
+                    shutil.rmtree(dst)
+                else:
+                    dst.unlink()
+
+            shutil.move(str(src), str(dst))
+            moved_dirs.append(item.name)
+
+    print(f"Moved directories to {dest_dir}: {moved_dirs}")
+
+def make_tree_writable(root_dir: Path):
+    """
+    Make a directory tree writable by everyone:
+      - directories: 0o777
+      - files:       0o666
+    """
+    if not root_dir.exists():
+        return
+
+    # Make the root directory writable
+    if root_dir.is_dir():
+        root_dir.chmod(0o777)
+
+        for item in root_dir.rglob("*"):
+            if item.is_dir():
+                item.chmod(0o777)
+            elif item.is_file():
+                item.chmod(0o666)
+
+
+def copy_directories_into_export(libname: str, product_name: str, mat10_version: str, be_or_mat10_2_version: str):
+    sand_mat10_dir = Path.cwd()
+    product_root = sand_mat10_dir.parent
+
+    source_root_mat10 = product_root / "MAT10_UPT" / f"{product_name}@{mat10_version}"
+    source_root_be = product_root / "BE_UPT" / f"{product_name}@{be_or_mat10_2_version}"
+    export_dir = sand_mat10_dir / "SANDBOX" / "EXPORT"
+
+    export_dir.mkdir(parents=True, exist_ok=True)
+
+    dirs_to_copy = [
+        "packaging",
+        "libs",
+        "doc",
+        "behaviour",
+        "INTERFACE",
+        "SIP",
+        "ccs",
+        "electrical",
+        "MENTOR/FASTSCAN",
+        "NOVAS",
+        "ibis",
+        "ipxact",
+        "delay_calculation",
+        "simulation",
+        "test",
+    ]
+
+    copied_dirs = []
+
+    for rel_dir in dirs_to_copy:
+        src = source_root_mat10 / rel_dir
+        dst = export_dir / rel_dir
+
+        if not src.exists():
+            continue
+
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(src, dst)
+        copied_dirs.append(rel_dir)
+
+        # Make the entire copied tree writable
+        make_tree_writable(dst)
+
+    # Ensure export_dir/physical exists
+    physical_export_dir = export_dir / "physical"
+    physical_export_dir.mkdir(parents=True, exist_ok=True)
+
+    # Make physical dir writable too
+    make_tree_writable(physical_export_dir)
+
+    # Copy .hcell if present from MAT10 physical
+    copied_hcell = None
+    mat10_physical_dir = source_root_mat10 / "physical"
+    if mat10_physical_dir.is_dir():
+        hcell_files = list(mat10_physical_dir.glob("*.hcell"))
+        if hcell_files:
+            hcell_src = hcell_files[0]
+            hcell_dst = physical_export_dir / hcell_src.name
+            shutil.copy2(hcell_src, hcell_dst)
+            copied_hcell = hcell_src.name
+            hcell_dst.chmod(0o666)
+
+    # Copy all .spi files from BE physical into export physical directory
+    be_physical_dir = source_root_be / "physical"
+    copied_spi_files = []
+    if be_physical_dir.is_dir():
+        spi_files = list(be_physical_dir.glob("*.spi"))
+        for spi_src in spi_files:
+            spi_dst = physical_export_dir / spi_src.name
+            shutil.copy2(spi_src, spi_dst)
+            copied_spi_files.append(spi_src.name)
+            spi_dst.chmod(0o666)
+
+    # Copy *erc.waiver and *esd.waiver from BE MENTOR into export MENTOR/CALIBRE
+    be_mentor_dir = source_root_be / "MENTOR"
+    calibre_export_dir = export_dir / "MENTOR" / "CALIBRE"
+    calibre_export_dir.mkdir(parents=True, exist_ok=True)
+
+    copied_waiver_files = []
+    if be_mentor_dir.is_dir():
+        erc_waivers = list(be_mentor_dir.glob("*erc.waiver"))
+        esd_waivers = list(be_mentor_dir.glob("*esd.waiver"))
+            
+        for waiver_src in erc_waivers + esd_waivers:
+            if waiver_src.name.endswith("erc.waiver"):
+                dst_name = f"{libname}_erc.waiver"
+            elif waiver_src.name.endswith("esd.waiver"):
+                dst_name = f"{libname}_esd.waiver"
+            else:
+                continue
+                
+            waiver_dst = calibre_export_dir / dst_name
+            shutil.copy2(waiver_src, waiver_dst)
+            copied_waiver_files.append(dst_name)
+            waiver_dst.chmod(0o666)
+
+    print("Copied directories:")
+    if copied_dirs:
+        for d in copied_dirs:
+            print(f" - {d}")
+    else:
+        print(" - None")
+
+    print("Copied files:")
+    if copied_hcell:
+        print(f" - physical/{copied_hcell}")
+
+    if copied_spi_files:
+        for f in copied_spi_files:
+            print(f" - physical/{f}")
+
+    if copied_waiver_files:
+        for f in copied_waiver_files:
+            print(f" - MENTOR/CALIBRE/{f}")
+
+           
+
+def delete_rnkps_pdf_from_export():
+    sand_mat10_dir = Path.cwd()
+    doc_dir = sand_mat10_dir / "SANDBOX" / "EXPORT" / "doc"
+
+    if not doc_dir.is_dir():
+        raise FileNotFoundError(f"doc directory not found: {doc_dir}")
+
+    matches = list(doc_dir.glob("*_rnkps.pdf"))
+
+    if not matches:
+        print(f"No *_rnkps.pdf file found in: {doc_dir}")
+        return
+
+    for pdf_path in matches:
+        pdf_path.unlink()
+        print(f"Deleted file: {pdf_path}")
+
+
+def run_kpsrn_and_copy_pdf(product_name: str):
+    sand_mat10_dir = Path.cwd()
+    sandbox_dir = sand_mat10_dir / "SANDBOX"
+    export_doc_dir = sandbox_dir / "EXPORT" / "doc"
+
+    if not sandbox_dir.is_dir():
+        raise FileNotFoundError(f"SANDBOX directory not found: {sandbox_dir}")
+
+    if not export_doc_dir.is_dir():
+        raise FileNotFoundError(f"EXPORT/doc directory not found: {export_doc_dir}")
+
+    perl_script = "/work/LIPAM/AUTOMATION/DOC_GENRATION/kpsrn_index_new.pl"
+    index_html = "EXPORT/doc/index.html"
+
+    result = subprocess.run(
+        ["perl", perl_script, "-i", index_html],
+        cwd=str(sandbox_dir),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            "kpsrn_index_new.pl failed\n"
+            f"stdout:\n{result.stdout}\n"
+            f"stderr:\n{result.stderr}"
+        )
+
+    print(result.stdout)
+
+    # Find generated *_rnkps.pdf in SANDBOX
+    pdf_matches = list(sandbox_dir.glob("*_rnkps.pdf"))
+
+    if not pdf_matches:
+        raise FileNotFoundError("No *_rnkps.pdf file generated in SANDBOX")
+
+    # Copy the first match to EXPORT/doc
+    pdf_src = pdf_matches[0]
+    pdf_dst = export_doc_dir / pdf_src.name
+
+    if pdf_dst.exists():
+        pdf_dst.unlink()
+
+    shutil.copy2(pdf_src, pdf_dst)
+
+    print(f"Copied {pdf_src.name} to {pdf_dst}")
+
+
+
+def run_bbview_create(methodology: str):
+    sandbox_dir = Path.cwd() / "SANDBOX"
+    export_dir = sandbox_dir / "EXPORT"
+
+    if not export_dir.is_dir():
+        raise FileNotFoundError(f"EXPORT directory not found: {export_dir}")
+
+    #packaging_dir = export_dir / "packaging"
+    packaging_dir = sandbox_dir / "packaging"
+    packaging_dir.mkdir(parents=True, exist_ok=True)
+
+    vc_bbview = packaging_dir / "vc.bbview"
+
+    # Make existing file writable if it already exists
+    if vc_bbview.exists():
+        try:
+            os.chmod(vc_bbview, 0o664)
+            print(f"Updated permission to writable for: {vc_bbview}")
+        except Exception as e:
+            raise RuntimeError(f"Failed to change permission for {vc_bbview}: {e}")
+
+    # Also ensure directory is writable
+    try:
+        os.chmod(packaging_dir, 0o775)
+    except Exception as e:
+        print(f"Warning: could not change permission for {packaging_dir}: {e}")
+
+    iptype = f"{methodology}/default"
+
+    cmd = [
+        "bbviewCreate",
+        "-input", str(export_dir),
+        "-iptype", iptype,
+        "-output", str(vc_bbview),
+    ]
+
+    print("Running command:")
+    print(" ".join(cmd))
+
+    result = subprocess.run(
+        cmd,
+        cwd=str(sandbox_dir),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            "bbviewCreate failed\n"
+            f"stdout:\n{result.stdout}\n"
+            f"stderr:\n{result.stderr}"
+        )
+
+    print(result.stdout)
+
+
+
+
+def compare_bbview_files(product_name: str, mat10_version: str):
+    sand_mat10_dir = Path.cwd()
+    generated_bbview = sand_mat10_dir / "SANDBOX" / "packaging" / "vc.bbview"
+    product_root = sand_mat10_dir.parent
+    mat10_bbview = (
+        product_root
+        / "MAT10_UPT"
+        / f"{product_name}@{mat10_version}"
+        / "packaging"
+        / "vc.bbview"
+    )
+    output_path = sand_mat10_dir / "bbview_comparison"
+
+    with open(mat10_bbview, "r", encoding="utf-8", errors="ignore") as f:
+        mat10_lines = f.readlines()
+
+    with open(generated_bbview, "r", encoding="utf-8", errors="ignore") as f:
+        generated_lines = f.readlines()
+
+    def extract_map_section(lines):
+        start_index = None
+        end_index = None
+
+        for idx, line in enumerate(lines):
+            if line.strip() == "MAP":
+                start_index = idx + 1
+                continue
+
+            if line.strip() == "END" and start_index is not None:
+                end_index = idx
+                break
+
+        if start_index is None or end_index is None:
+            return []
+
+        return lines[start_index:end_index]
+
+    # Keep only lines between MAP and END
+    mat10_map_lines = extract_map_section(mat10_lines)
+    generated_map_lines = extract_map_section(generated_lines)
+
+    extra_lines = []
+
+    i = 0
+    j = 0
+
+    while i < len(mat10_map_lines) and j < len(generated_map_lines):
+        if mat10_map_lines[i] == generated_map_lines[j]:
+            i += 1
+            j += 1
+        else:
+            extra_lines.append(mat10_map_lines[i])
+            i += 1
+
+    while i < len(mat10_map_lines):
+        extra_lines.append(mat10_map_lines[i])
+        i += 1
+
+    seen = set()
+    final_lines = []
+
+    for line in extra_lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        last_col = stripped.split()[-1]
+
+        if last_col not in seen:
+            seen.add(last_col)
+            final_lines.append(last_col + "\n")
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.writelines(final_lines)
+
+    print(f"Processed comparison written to: {output_path}")
+
+
+def copy_bbview_comparison_files(product_name: str, mat10_version: str, libname: str):
+    sand_mat10_dir = Path.cwd()
+    output_path = sand_mat10_dir / "bbview_comparison"
+    product_root = sand_mat10_dir.parent
+    mat10_dir = product_root / "MAT10_UPT" / f"{product_name}@{mat10_version}"
+    export_dir = sand_mat10_dir / "SANDBOX" / "EXPORT"
+
+    if not output_path.exists():
+        print(f"bbview_comparison file not found: {output_path}")
+        return
+
+    export_dir.mkdir(parents=True, exist_ok=True)
+
+    with open(output_path, "r", encoding="utf-8", errors="ignore") as f:
+        entries = [line.strip() for line in f if line.strip()]
+
+    copied_files = []
+    not_copied_files = []
+
+    for rel_path in entries:
+        rel_path = rel_path.replace("<library>", libname)
+
+        src = mat10_dir / rel_path
+        dst = export_dir / rel_path
+
+        if not src.exists():
+            print(f"Not copied (missing): {rel_path}")
+            not_copied_files.append(rel_path)
+            continue
+
+        dst.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            shutil.copy2(src, dst)
+            dst.chmod(0o666)  # make copied file writable by everyone
+            print(f"Copied: {rel_path}")
+            copied_files.append(rel_path)
+        except Exception as e:
+            print(f"Not copied ({rel_path}): {e}")
+            not_copied_files.append(rel_path)
+
+    print("\nSummary:")
+    print(f"Copied files: {len(copied_files)}")
+    print(f"Not copied files: {len(not_copied_files)}")
+
+def run_unicad_update(product_name: str, be_or_mat10_2_version: str, mat10_version: str):
+    sandbox_dir = Path.cwd() / "SANDBOX"
+    export_dir = sandbox_dir / "EXPORT"
+
+    if not export_dir.is_dir():
+        raise FileNotFoundError(f"EXPORT directory not found: {export_dir}")
+
+    # version = first part before '-' in be_or_mat10_2_version
+    version = be_or_mat10_2_version.split("-", 1)[0].strip()
+
+    # main_version = last two characters of mat10_version
+    #main_version = mat10_version[-2:].strip()
+
+    cmd = ["bsub", "-I", "-q", "long", "unicadUpdate", "-sourcedir", str(export_dir), "-model", product_name, "-mainversion", version, "-intent", "FINAL", "-suffix", "00", "-update-layout-tags",]
+
+    print("Running command:")
+    print(" ".join(cmd))
+
+    result = subprocess.run(
+        cmd,
+        cwd=str(sandbox_dir),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            "unicadUpdate failed\n"
+            f"stdout:\n{result.stdout}\n"
+            f"stderr:\n{result.stderr}"
+        )
+
+    print(result.stdout)
+
+
+def GDS_POST_PROCESSING(cds_lib_path, libname, mat09_cdsoa_oa_path):
+    overwrite_cds(cds_lib_path, libname, mat09_cdsoa_oa_path)
+
+    script_path = write_dk_fixedCell_scripts()
+    result = subprocess.run(
+        [str(script_path), libname],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            "dk_fixedCell_cellmap_gen failed\n"
+            f"stdout:\n{result.stdout}\n"
+            f"stderr:\n{result.stderr}"
+        )
+
+    print(result.stdout)
+
+    create_libderiv_script = write_create_libderiv_options_file_script()
+    cell_map_path = Path.cwd() / "cell.map"
+
+    result = subprocess.run(
+        ["perl", str(create_libderiv_script), str(cell_map_path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            "create_libderiv_options_file.pl failed\n"
+            f"stdout:\n{result.stdout}\n"
+            f"stderr:\n{result.stderr}"
+        )
+
+    print(result.stdout)
+
+
+def PACKAGE_CREATION(libname, product_name, mat10_version, methodology, be_or_mat10_2_version):
+    move_directories_into_export(libname)
+    copy_directories_into_export(libname, product_name, mat10_version, be_or_mat10_2_version)
+    delete_rnkps_pdf_from_export()
+    run_kpsrn_and_copy_pdf(product_name)
+    run_bbview_create(methodology)
+    compare_bbview_files(product_name, mat10_version)
+    copy_bbview_comparison_files(product_name, mat10_version, libname)
+    
+    ############################################### change permission of all directories and files in EXPORT directory
+    run_unicad_update(product_name, be_or_mat10_2_version, mat10_version)
+
+
+
+def setup_timing_logger(project_root: Path):
+    log_dir = project_root / "Intermediate_logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    log_file = log_dir / "execution_timing.log"
+
+    logger = logging.getLogger("timing_logger")
+    logger.setLevel(logging.INFO)
+    logger.handlers.clear()
+    logger.propagate = False
+
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(file_handler)
+
+    return logger, log_file
+
+def run_with_timing(logger, func, *args, **kwargs):
+    start_dt = datetime.now()
+    logger.info(f"[START] {func.__name__} | {start_dt.strftime('%Y-%m-%d %H:%M:%S')}")
+
+    t0 = time.perf_counter()
+    result = func(*args, **kwargs)
+    t1 = time.perf_counter()
+
+    end_dt = datetime.now()
+    elapsed_sec = t1 - t0
+    elapsed_min = elapsed_sec / 60.0
+
+    logger.info(
+        f"[END]   {func.__name__} | {end_dt.strftime('%Y-%m-%d %H:%M:%S')} | "
+        f"Duration: {elapsed_sec:.2f} seconds | "
+        f"Duration: **({elapsed_min:.2f} minutes)**"
+    )
+    logger.info("-" * 80)
+
+    return result
+
+
+
+def compare_apache_def_gz_files(
+    sand_mat10_dir: Path,
+    product_name_dir: Path,
+    libname: str,
+    product_name: str,
+    mat10_version: str,
+    golden_topcells: list[str]
+):
+    """
+    Compare generated and reference Apache .def.gz files
+
+    Generated:
+      sand_mat10_dir / "WorkDB" / "setup" / f"MAT10_{libname}" / "APACHE" / "RH" / "physical" / <topcell>.def.gz
+
+    Reference:
+      product_name_dir / "MAT10_UPT" / f"{product_name}@{mat10_version}" / "APACHE" / "RH" / "physical" / <topcell>.def.gz
+
+    Returns:
+      0 -> no differences found
+      1 -> differences found and report written
+    """
+    gen_dir = sand_mat10_dir / "WorkDB" / "setup" / f"MAT10_{libname}" / "APACHE" / "RH" / "physical"
+    ref_dir = product_name_dir / "MAT10_UPT" / f"{product_name}@{mat10_version}" / "APACHE" / "RH" / "physical"
+
+    diff_dir = sand_mat10_dir / "Apache_def_differences"
+    diff_dir.mkdir(parents=True, exist_ok=True)
+    report_file = diff_dir / "Apache_def_differences.txt"
+
+    ignore_prefixes = (
+        "### Tool",
+        "### RedHawk Version",
+        "### Vendor",
+        "### Date",
+        "### Date generated",
+        "### Command",
+        "VERSION",
+    )
+
+    def load_filtered_lines_gz(file_path: Path):
+        with gzip.open(file_path, "rt", encoding="utf-8", errors="ignore") as f:
+            filtered = []
+            for line in f:
+                stripped = line.lstrip()
+                if any(stripped.startswith(prefix) for prefix in ignore_prefixes):
+                    continue
+                filtered.append(line.rstrip("\n"))
+        return filtered
+
+    differences_found = False
+    report_sections = []
+
+    for topcell in golden_topcells:
+        ref_file = ref_dir / f"{topcell}.def.gz"
+        gen_file = gen_dir / f"{topcell}.def.gz"
+
+        cell_report = [f"cell: {topcell}"]
+
+        if not ref_file.is_file():
+            cell_report.append(f"Missing reference file: {ref_file}")
+            report_sections.append("\n".join(cell_report))
+            differences_found = True
+            continue
+
+        if not gen_file.is_file():
+            cell_report.append(f"Missing generated file: {gen_file}")
+            report_sections.append("\n".join(cell_report))
+            differences_found = True
+            continue
+
+        ref_lines = load_filtered_lines_gz(ref_file)
+        gen_lines = load_filtered_lines_gz(gen_file)
+
+        max_len = max(len(ref_lines), len(gen_lines))
+        cell_diff_lines = []
+
+        for idx in range(max_len):
+            ref_line = ref_lines[idx] if idx < len(ref_lines) else None
+            gen_line = gen_lines[idx] if idx < len(gen_lines) else None
+
+            if ref_line == gen_line:
+                continue
+
+            differences_found = True
+            line_no = idx + 1
+            cell_diff_lines.append(f"Line {line_no}:")
+
+            if ref_line is None:
+                cell_diff_lines.append("REF: <missing>")
+            else:
+                cell_diff_lines.append(f"REF: {ref_line}")
+
+            if gen_line is None:
+                cell_diff_lines.append("GEN: <missing>")
+            else:
+                cell_diff_lines.append(f"GEN: {gen_line}")
+
+            cell_diff_lines.append("")
+
+        if cell_diff_lines:
+            cell_report.extend(cell_diff_lines)
+            report_sections.append("\n".join(cell_report))
+
+    if differences_found:
+        report_file.write_text("\n\n".join(report_sections).rstrip() + "\n", encoding="utf-8")
+        print(f"Differences found. Report written to: {report_file}")
+        return 1
+    else:
+        if report_file.exists():
+            report_file.unlink()
+        print("No differences found in Apache .def.gz files.")
+        return 0
+
+
+
+
+def check_uptq_paths(UPT_BASE: str, product_name: str, mat10_version: str, be_or_mat10_2_version: str):
+    mat10_path = Path(UPT_BASE) / product_name / mat10_version
+    be_path = Path(UPT_BASE) / product_name / be_or_mat10_2_version
+
+    if mat10_path.is_dir() and be_path.is_dir():
+        flag_uptq = 0
+    else:
+        flag_uptq = 1
+
+    return flag_uptq
+
+
+
+
+if __name__ == "__main__":
+
+
+
+    if len(sys.argv) == 2 and sys.argv[1] in ("-", "--", "-h", "--h", "-help", "--help"):
+        print("Usage:\n python <script_path> <user_template_path>\n\n Example: python /path/to/CAD_view_impact_analyzer.py    /path/to/user_template\n")
+        sys.exit(0)
+
+    if len(sys.argv) < 2:
+        print("Usage:\n python <script_path> <user_template_path>\n\n Example: python /path/to/CAD_view_impact_analyzer.py    /path/to/user_template\n")
+        sys.exit(1)
+
+    
+    project_root = Path.cwd().resolve()
+    logger, timing_log_file = setup_timing_logger(project_root)
+    logger.info("=" * 80)
+    logger.info(f"Program started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info("=" * 80)
+    
+    
+    user_template_path = Path(sys.argv[1]).expanduser().resolve()
+    
+    #backup_existing_outputs()
+    
+    #setup_analyzer_workdir()
+
+    try:
+        
+        user_values = read_user_template(user_template_path)
+
+        product_name = user_values["product_name"]
+        mat10_version = user_values["mat10_version"]
+        be_or_mat10_2_version = user_values["be_version or mat10_2_version"]
+        dpds_value = user_values["dpds"]
+        pdk_value = user_values["pdk"]
+        ltk_value = user_values.get("ltk")
+        metal_option = user_values.get("metal_option")
+        process_option = user_values.get("process_option")
+        derivation_setup_extra_options = user_values.get("derivation_setup_extra_options")
+        derivation_make_extra_options = user_values.get("derivation_make_extra_options")
+        print("Values read from user_template:")
+        for k, v in user_values.items():
+            print(f"{k}: {v}")
+        run_gen_dot_ucdprod(dpds_value, pdk_value)
+        ucdprod_path = Path.cwd() / ".ucdprod"
+        ucdkeys_path = Path.cwd() / ".ucdkeys"
+        
+        if ltk_value:   
+            insert_ltk_after_libderiv(ucdprod_path, ltk_value)		
+        
+        # Load .ucdprod environment
+        #load_ucdprod_env()
+        #load_ucdprod_env(ucdprod_path.parent)
+        load_ucdprod_env(Path.cwd())
+
+        if ltk_value:
+            print_libderiv_techno_root()
+
+        # Path for out.log containing product name and versions available
+        cwd = os.getcwd()
+        outlog_path = os.path.join(cwd, OUTLOG_FILENAME)
+        
+        
+        flag_uptq = check_uptq_paths(UPT_BASE, product_name, mat10_version, be_or_mat10_2_version)
+        if flag_uptq == 0:
+            print(f"\nMAT 10 version and BE version for {product_name} is present in uptplus")
+        else:
+            print(f"\nMAT 10 version or BE version for {product_name} is not present at uptplus.")
+
+            # Run the two commands (source + dssc) and generate out.log
+            run_dssc_query(product_name, outlog_path)
+
+            # Validate against out.log
+            validate_product_and_version_with_outlog(product_name, mat10_version, outlog_path)
+            print("\nValidation successful: Product_name and MAT10_version match out.log.")
+            validate_product_and_version_with_outlog(product_name, be_or_mat10_2_version, outlog_path)
+            print("\nValidation successful: Product_name and BE_version match out.log.")
+
+            if replication_check(product_name, mat10_version):
+
+                print(
+                    f"\nChecking in uptpluscache area "
+                    f"Product '{product_name}' version "
+                    f"'{mat10_version}' is already present "
+                    "in uptpluscache")
+            else:
+            
+                run_with_timing(logger, replicate_to_upt, product_name, be_or_mat10_2_version)
+                run_with_timing(logger, wait_for_replication, product_name, be_or_mat10_2_version)
+				
+				
+            if replication_check(product_name, be_or_mat10_2_version):
+
+                print(
+                    f"\nChecking in uptpluscache area"
+                    f"Product '{product_name}' version "
+                    f"'{be_or_mat10_2_version}' is already present "
+                    "in uptpluscache")
+
+            else:
+                run_with_timing(logger, replicate_to_upt, product_name, be_or_mat10_2_version)
+                run_with_timing(logger, wait_for_replication, product_name, be_or_mat10_2_version)
+
+
+    except (ValueError, RuntimeError) as e:
+        print("\nERROR:", e)
+        move_files_to_intermediate_logs()
+        logger.info(f"[EXCEPTION] {type(e).__name__}: {e}")
+        logger.info("=" * 80)
+        logger.info(f"Program ended at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info("=" * 80)
+        sys.exit(1)
+
+    libpath1, libpath2 = derive_libpaths_from_upt(product_name, mat10_version, be_or_mat10_2_version)
+    print("Derived OA library paths:")
+    print(f"  MAT10  : {libpath1}")
+    print(f"  BE/MAT2: {libpath2}\n")
+
+    vc_bbview_path = Path(libpath1) / "packaging" / "vc.bbview"
+     
+    print(f"Reading vc.bbview: {vc_bbview_path}")
+    libname, methodology, process, topcell = parse_vc_bbview(vc_bbview_path)
+    print("\n\ncheck LIBRARY: \n", libname)
+    print("\n\ncheck methodology: \n", methodology)
+    print("\n\ncheck process: \n", process)
+    print("\n\ncheck topcell: \n", topcell)
+    print(f"LIBRARY from vc.bbview: {libname}")
+    
+
+    golden_topcells = sorted(set(topcell))
+    print(f"Number of Topcells in Mat10: {len(golden_topcells)}")
+
+    golden_topcell_file = Path.cwd() / "golden_topcell.list"
+    write_topcell_list(golden_topcells, golden_topcell_file)
+    #print(f"Golden Topcell list written to: {golden_topcell_file}")
+    print(f"Golden Topcell list written to: Intermediate_logs/golden_topcell.list")
+
+    setuplog_topcell, setuplog_topcell_file, setuplog_source = write_setuplog_topcell_list(libpath2)
+    setup_vs_golden = compare_cell_lists(golden_topcells, setuplog_topcell)
+
+    print("\n==== BE vs MAT10 TOPCELLS COMPARISON ====")
+
+
+    # Write comparison report
+    output_dirr = Path.cwd() / "Cell_Diff"
+    output_dirr.mkdir(parents=True, exist_ok=True)
+
+    comparison_csv = output_dirr / "topcell_diff_report.csv"
+    topcell_comparison(
+        comparison_csv,
+        setup_vs_golden
+    )
+    topcell_diff_report_csv_path = Path.cwd() / "Cell_Diff" / "topcell_diff_report.csv"
+    topcell_diff_report_csv_text = read_file_text(topcell_diff_report_csv_path)
+
+    topcell_list = Path.cwd() / TOPCELL_FILENAME
+    write_topcell_list(topcell, topcell_list)
+    #print(f"Topcell list written to: {topcell_list}\n")
+    techlib = get_techlib()
+    print("\ntechlib: ", techlib)
+    #print(topcell_diff_report_csv_text)
+    
+    
+    ## ==================LEAF CELLS============###
+    leaf_cells_present= False
+    leaf_be_file = None
+    if nonempty_leafcell(libpath1):
+    
+        mat10_db_path = resolve_library_db_path(libpath1)
+        be_db_path = resolve_library_db_path(libpath2)
+    
+        mat10_all_cells = get_cell_dirs_from_library_db(mat10_db_path)
+        be_all_cells = get_cell_dirs_from_library_db(be_db_path)
+    
+        leaf_cells_mat10 = filter_leaf_cells(mat10_all_cells, golden_topcells)
+        leaf_cells_be = filter_leaf_cells(be_all_cells, setuplog_topcell)
+    
+        #leaf_compare = compare_leafcell_lists(leaf_cells_mat10, leaf_cells_be)
+    
+    #print("\n=========== LEAF_CELLS COMPARISON ===========")
+    #print(f"Added   ({len(leaf_compare['added'])})   : "
+      #f"{' '.join(leaf_compare['added']) if leaf_compare['added'] else '-'}")
+    #print(f"Removed ({len(leaf_compare['removed'])}) : "
+      #f"{' '.join(leaf_compare['removed']) if leaf_compare['removed'] else '-'}")
+
+    #leaf_csv = Path.cwd() / "leafcell_comparison_report.csv"
+    #write_leafcell_comparison_csv(
+    #leaf_csv,
+    #libname,
+    #leaf_compare
+    #)
+    
+        leaf_mat10_file = Path.cwd() / "leafcell.list_MAT10"
+        leaf_be_file = Path.cwd() / "leafcell.list_BE"
+
+        write_cell_list(leaf_cells_mat10, leaf_mat10_file)
+        write_cell_list(leaf_cells_be, leaf_be_file)
+
+        print("\nLeaf cell list generation completed.")
+        
+        leaf_cells_present= True
+        
+    else:
+        print("\nSkipping leafcell_list extraction because "
+            f"'{Path(libpath1) / 'INTERFACE' / 'leafcell.list'}' "
+            "is empty.")
+        
+    #====================LEAF CELLS ENDS============#######
+	
+    overwrite_cds_lib(CDS_LIB_PATH, libname, libpath2, add_xorlib=True)
+    overwrite_cds_lib(CDS_LIB_TASK1_PATH, libname, libpath1, add_xorlib=False)
+    # 6) Copy two more files from their source location to $PWD and edit them
+    dst1 = cp2pwd(SKILL_1)
+    dst2 = cp2pwd(SKILL_2)
+
+    edit_replay1(dst1, reflib=libname, techlib=techlib, topcell_list=topcell_list)
+    edit_replay(dst2, reflib=libname, topcell_list=topcell_list)
+
+    print(f"Created {CDS_LIB_PATH} and {CDS_LIB_TASK1_PATH}")
+    print(f"Ready to run {dst2.name}")
+    print(f"Comparison in progress. Please wait")
+    run_with_timing(logger, CAD_VIEW_IMPACT_ANALYZER, "replay.il")
+    print(f"OA XOR completed")
+
+    move_terminal_logs_to_intermediate()
+
+    pin_checking()
+    terminal_diff_report_csv_path = TERMINAL_LOG_DIR / "terminal_diff_report.csv"
+    terminal_diff_report_csv_text = read_file_text(terminal_diff_report_csv_path)
+    #print(terminal_diff_report_csv_text)
+
+    cwd = Path.cwd()
+    intermediate_dir = cwd / "Intermediate_logs"
+    output_dir = cwd / "Output"
+    intermediate_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    diff_dir =cwd / "Diff_Logs"
+    diff_dir.mkdir(parents=True, exist_ok=True)
+
+    log1 = cwd /"create_XORLIB.log"
+    log2 = cwd /"compare_XORLIB.log"
+
+    if log1.exists():
+        shutil.move(str(log1), str(diff_dir / log1.name))
+        #print(f"Moved {log1.name} -> {diff_dir / log1.name}")
+    else:
+        print(f"WARNING: {log1} not found; nothing to move")
+
+    if log2.exists():
+        shutil.move(str(log2), str(diff_dir / log2.name))
+        #print(f"Moved {log2.name} -> {diff_dir / log2.name}")
+    else:
+        print(f"WARNING: {log2} not found; nothing to move")
+
+    summ_log = output_dir / "summary.log"
+    log2_path = diff_dir / "compare_XORLIB.log"
+    text = log2_path.read_text()
+    pattern_1 = r"\(\(\s*([+-]?\d+(?:\.\d+)?)\s+([+-]?\d+(?:\.\d+)?)\s*\)\s*\(\s*([+-]?\d+(?:\.\d+)?)\s+([+-]?\d+(?:\.\d+)?)\s*\)\s*\)"
+    text = re.sub(pattern_1, "", text)
+    pattern_2 = r"^\s*$\n?"
+    text = re.sub(pattern_2, "", text, flags=re.MULTILINE)
+    summ_log.write_text(text)
+    print(f"Created summary.log: Output/summary.log")
+
+    report_log = output_dir / "report.log"
+
+    try:
+        text =summ_log.read_text()
+    except FileNotFoundError:
+        print(f"WARNING: {summ_log} not found; report.log not created")
+    else:
+        lines = []
+
+        for line in text.splitlines():
+            if line.startswith("Comparing Lib:") or line.startswith("difference on lpp:"):
+                line = re.sub(r'difference on lpp:\("instance" "drawing"\)', "", line)
+                if line.strip():
+                    lines.append(line)
+
+        if lines:
+            out_text = "\n".join(lines) + "\n"
+            report_log.write_text(out_text)
+            print("Created report.log: Output/report.log")
+            
+            diff_lines = read_diff_lines_from_log()
+            
+            sip_lef_generation = check_sip_lef()
+
+            prompt = build_prompt(diff_lines, terminal_diff_report_csv_text, topcell_diff_report_csv_text, sip_lef_generation)
+
+
+            generate_token_and_call_api(api_key,client_app_name,prompt)
+            open_html_report()
+            move_files_to_intermediate_logs()
+            csv_file_path = Path.cwd() / "Output" / "impacted_view_report.csv"
+            csv_to_text, liberty_verilog_flag = convert_csv_to_text(csv_file_path)
+            if liberty_verilog_flag == 1:
+                print("Generation is not triggered. Out of Scope.")
+                sys.exit(0)
+            
+            
+			
+        else:
+            print(f"WARNING: {summ_log} not found; report.log not created")
+    
+    
+
+    
+    print("\n\n==========Generation Script Starts=============\n\n")
+    
+    
+    
+    
+    product_name_dir = Path.cwd() / product_name
+    product_name_dir.mkdir(exist_ok=True)
+    os.chdir(product_name_dir)
+    
+    #product_dir = f"{product_name}@{mat10_version}"
+    #Path(product_dir).mkdir(exist_ok=True)
+    #os.chdir(product_dir)
+    #------------------------do further changes also for directory <product_name>@<version> like in setup_mat09_directory
+    
+    choice = methodology_to_choice(methodology)
+    
+    run_with_timing(logger, DIRECTORY_STRUCTURE_CREATION, choice)
+    create_upt_symlink_structure(product_name, be_or_mat10_2_version, mat10_version)
+    run_with_timing(logger, MAT09_CREATION, product_name, be_or_mat10_2_version, mat10_version, process, leaf_cells_present, leaf_be_file,)
+    
+
+    if process in ("P28", "CMOSP28"):
+        mat09_cdsoa_oa_path = str(Path.cwd() / "SAND_MAT10" / "MAT09" / "OA")
+    else:
+        mat09_cdsoa_oa_path = str(Path.cwd() / "SAND_MAT10" / "MAT09" / "CADENCE" / "CDSOA")
+        
+    mat09_dir = Path.cwd() / "SAND_MAT10" / "MAT09"
+    
+    sand_mat10_dir = Path.cwd() / "SAND_MAT10"
+    sand_mat10_dir.mkdir(parents=True, exist_ok=True)
+
+    sand_ucdprod_path = sand_mat10_dir / ".ucdprod"
+    sand_ucdkeys_path = sand_mat10_dir / ".ucdkeys"
+    shutil.copy2(ucdprod_path, sand_ucdprod_path)
+    shutil.copy2(ucdkeys_path, sand_ucdkeys_path)
+    
+    os.chdir(sand_mat10_dir)
+    load_ucdprod_env(sand_mat10_dir)
+
+    if ltk_value:
+        print_libderiv_techno_root()
+    
+    cds_lib_path = str(Path.cwd() / "cds.lib")
+
+    run_with_timing(logger, GDS_POST_PROCESSING, cds_lib_path, libname, mat09_cdsoa_oa_path)    
+
+    #Extract libraries only if REFLIB_TAG exists
+    library_values = {}
+    if user_values.get("reflib_count", 0) > 0:
+        library_values = extract_libraries_from_reflibs(user_values)
+        print("REFLIB_TAG section found and libraries extracted:")
+        for i in range(1, user_values["reflib_count"] + 1):
+            print(f"library{i} = {library_values[f'library{i}']}")
+    else:
+        print("No REFLIB_TAG section found. Proceeding without -refLib options.")
+    custom_strmout_opt = Path.cwd() / "custom_strmout.opt"
+
+    #run_with_timing(logger, derivation_setup, mat09_dir=mat09_dir, methodology=methodology, be_version=be_or_mat10_2_version, custom_strmout_opt=custom_strmout_opt, user_values=user_values, library_values=library_values,)
+    run_with_timing(logger, derivation_setup, mat09_dir, methodology, be_or_mat10_2_version, custom_strmout_opt, user_values, library_values,)
+    
+    targeted_views = read_targeted_tasks()
+    print("\nTargeted views from targeted_tasks.tab:")
+    for v in targeted_views:
+        print(" -", v)
+
+    run_with_timing(logger, Impacted_CAD_View_Generation, logger, csv_file_path, api_key, client_app_name, targeted_views, sand_mat10_dir, product_name_dir, product_name, mat10_version, golden_topcells, libname,)
+    
+    run_with_timing(logger, PACKAGE_CREATION, libname, product_name, mat10_version, methodology, be_or_mat10_2_version)
+
