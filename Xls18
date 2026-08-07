@@ -1,0 +1,33 @@
+def resolve_stuck_to(stuck_to_text, table2_map):
+    if not stuck_to_text:
+        return ""
+
+    resolved = []
+
+    for token in split_values(stuck_to_text):
+        token = token.strip()
+        if not token:
+            continue
+
+        idx = token.find("(")
+        if idx == -1:
+            key, tail = token, ""
+        else:
+            key = token[:idx].strip()
+            tail = "".join(
+                "(" + g.strip() + ")"
+                for g in re.findall(r"\(([^()]*)\)", token[idx:])
+            )
+
+        if key:
+            if key not in table2_map:
+                print(f"Warning: stuck-to key '{key}' not found in Table 2")
+            resolved.append(table2_map.get(key, ""))
+
+        if tail:
+            resolved.append(tail)
+
+    return "".join(resolved)
+
+
+
